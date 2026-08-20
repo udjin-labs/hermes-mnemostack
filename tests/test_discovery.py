@@ -43,7 +43,7 @@ def test_lifecycle_is_callable(monkeypatch, tmp_path):
     import hermes_mnemostack.provider as pmod
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / "mnemostack.json").write_text("{}")
+    (tmp_path / "mnemostack.json").write_text('{"mode": "local"}')
 
     class _NullClient:
         def recall(self, query, *, limit=5, filters=None):

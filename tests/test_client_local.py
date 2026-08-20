@@ -80,3 +80,30 @@ def test_caller_filters_cannot_widen_scope(local_pair):
     # A caller-supplied filter must never override the client's own scope.
     hits = writer.recall("scoped datum", filters={"hermes_profile": "coder"})
     assert all("scoped datum" not in h.text for h in hits)
+
+
+def test_same_turn_text_across_profiles_is_not_a_cross_scope_duplicate(local_pair):
+    """R1 (both reviewers, P1): two profiles capturing the same
+    (source, offset, text) — trivially likely for short turns like "hi"
+    under one session id — must yield TWO points, not a silent duplicate
+    that leaves the second profile's memory invisible."""
+    coder, writer, _store = local_pair
+    item = MemoryItem(text="hi", source="hermes/cli/sess-1", offset=0)
+    assert coder.remember([item]).stored == 1
+    out = writer.remember([item])
+    assert (out.stored, out.duplicates) == (1, 0)  # not a duplicate!
+    assert any(h.text == "hi" for h in coder.recall("hi"))
+    assert any(h.text == "hi" for h in writer.recall("hi"))
+
+
+def test_oversized_item_chunks_instead_of_failing(local_pair):
+    """R1 (agent P1): an item past the per-item cap rides the chunker —
+    the batch must not be lost."""
+    coder, _writer, _store = local_pair
+    big = "deploy notes " * 4000  # > 32768 chars
+    out = coder.remember(
+        [MemoryItem(text=big, source="hermes/cli/s", offset=0),
+         MemoryItem(text="small survivor", source="hermes/cli/s", offset=1)]
+    )
+    assert out.failed == 0 and out.stored > 2  # chunk expansion happened
+    assert any("survivor" in h.text for h in coder.recall("small survivor"))

@@ -36,6 +36,9 @@ try:  # pragma: no cover
 except ImportError:  # hermes-agent 0.19
 
     def is_trivial_prompt(text: str | None) -> bool:  # type: ignore[misc]
+        # Conservative GUESS, not a verified match of the 0.20 gate (which
+        # is regex-based): may skip prefetch for short real queries like
+        # "k8s"; capture is unaffected either way.
         if not text or not text.strip():
             return True
         stripped = text.strip()
@@ -67,13 +70,18 @@ class MnemostackProvider(MemoryProvider):
         self._session_id = ""
         self._platform = ""
         self._agent_context = ""
-        self._turn_index = 0
         self._lock = threading.Lock()
-        self._prefetched: str = ""
-        self._prefetched_count = 0
+        # Per-session state: the ABC threads session_id through
+        # prefetch/queue_prefetch/sync_turn for hosts serving concurrent
+        # sessions — keying by it keeps one session's recall block and
+        # turn numbering from leaking into another. Key "" = the
+        # provider's own session (single-session CLI).
+        self._turn_index: dict[str, int] = {}
+        self._prefetched: dict[str, tuple[str, int]] = {}
+        self._prefetch_gen: dict[str, int] = {}
         self._last_injected_count: int | None = None
         self._prefetch_thread: threading.Thread | None = None
-        self._sync_thread: threading.Thread | None = None
+        self._sync_threads: list[threading.Thread] = []
 
     # -- Required ABC surface -------------------------------------------------
 
@@ -82,10 +90,31 @@ class MnemostackProvider(MemoryProvider):
         return PROVIDER_NAME
 
     def is_available(self) -> bool:
-        # Contract: config and deps only, no network.
-        return is_configured()
+        # Contract: config and deps only, no network. Mode-specific
+        # required fields are validated HERE so hermes reports an
+        # unavailable provider instead of activating one that dies in
+        # initialize() (remote mode without a base_url).
+        if not is_configured():
+            return False
+        try:
+            cfg = load_config()
+        except Exception:  # noqa: BLE001 — malformed config = unavailable
+            return False
+        if cfg["mode"] == "remote" and not cfg["base_url"]:
+            return False
+        return True
 
     def unavailable_reason(self) -> str:
+        if is_configured():
+            try:
+                cfg = load_config()
+            except Exception as exc:  # noqa: BLE001
+                return f"mnemostack config is invalid: {exc}"
+            if cfg["mode"] == "remote" and not cfg["base_url"]:
+                return (
+                    "mnemostack remote mode needs a base_url — set it in "
+                    "mnemostack.json or MNEMOSTACK_BASE_URL"
+                )
         return (
             "mnemostack is not configured — run `hermes memory setup` or set "
             "MNEMOSTACK_MODE (remote: MNEMOSTACK_BASE_URL + MNEMOSTACK_API_KEY)"
@@ -121,6 +150,13 @@ class MnemostackProvider(MemoryProvider):
         client = self._client
         if client is None or is_trivial_prompt(query):
             return
+        key = session_id or ""
+        with self._lock:
+            # Generation gate: an outrun earlier recall finishing AFTER a
+            # newer one must not overwrite the fresher block with stale
+            # memories for a previous query.
+            gen = self._prefetch_gen.get(key, 0) + 1
+            self._prefetch_gen[key] = gen
 
         def _run() -> None:
             try:
@@ -130,8 +166,8 @@ class MnemostackProvider(MemoryProvider):
                 hits = []
             block = self._format_hits(hits)
             with self._lock:
-                self._prefetched = block
-                self._prefetched_count = len(hits)
+                if self._prefetch_gen.get(key, 0) == gen:
+                    self._prefetched[key] = (block, len(hits))
 
         t = threading.Thread(target=_run, daemon=True, name="mnemostack-prefetch")
         with self._lock:
@@ -141,12 +177,12 @@ class MnemostackProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Serve the cached background result; if the thread is still in
         # flight give it a short grace window rather than blocking a turn.
+        key = session_id or ""
         t = self._prefetch_thread
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
         with self._lock:
-            block, count = self._prefetched, self._prefetched_count
-            self._prefetched, self._prefetched_count = "", 0
+            block, count = self._prefetched.pop(key, ("", 0))
         self._last_injected_count = count if block else None
         return block
 
@@ -186,9 +222,10 @@ class MnemostackProvider(MemoryProvider):
         if self._agent_context != "primary":
             # Cron/subagent/flush contexts must not pollute user memory.
             return
-        turn = self._turn_index
-        self._turn_index += 1
         sid = session_id or self._session_id
+        with self._lock:
+            turn = self._turn_index.get(sid, 0)
+            self._turn_index[sid] = turn + 1
         items = []
         for role, content in (("user", user_content), ("assistant", assistant_content)):
             content = (content or "").strip()
@@ -210,13 +247,39 @@ class MnemostackProvider(MemoryProvider):
         client = self._client
 
         def _sync() -> None:
+            # Capture must never break a turn — but it also must not lose
+            # BOTH sides to one bad item: on a service-rejected batch,
+            # retry per item so the valid side still lands. Permanent
+            # conditions (401 revoked key, 507 quota) log like transient
+            # ones here — a deliberate v1 tradeoff, see MnemostackClientError.
             try:
-                client.remember(items)
-            except Exception as exc:  # noqa: BLE001 — capture must never break a turn
-                logger.warning("mnemostack sync_turn failed: %s", exc)
+                out = client.remember(items)
+                if out.failed:
+                    logger.warning(
+                        "mnemostack capture: %d item(s) failed to embed", out.failed
+                    )
+                return
+            except Exception as exc:  # noqa: BLE001
+                if len(items) < 2:
+                    logger.warning("mnemostack sync_turn failed: %s", exc)
+                    return
+                logger.warning(
+                    "mnemostack sync_turn batch failed (%s) — retrying per item", exc
+                )
+            for item in items:
+                try:
+                    client.remember([item])
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "mnemostack capture lost a %s item: %s",
+                        item.metadata.get("hermes_role", "turn"),
+                        exc,
+                    )
 
         t = threading.Thread(target=_sync, daemon=True, name="mnemostack-sync")
-        self._sync_thread = t
+        with self._lock:
+            self._sync_threads = [x for x in self._sync_threads if x.is_alive()]
+            self._sync_threads.append(t)
         t.start()
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
@@ -236,17 +299,26 @@ class MnemostackProvider(MemoryProvider):
         rewound: bool = False,
         **kwargs: Any,
     ) -> None:
+        old = self._session_id
         self._session_id = new_session_id
         if reset:
-            self._turn_index = 0
             with self._lock:
-                self._prefetched, self._prefetched_count = "", 0
+                for sid in (old, new_session_id, ""):
+                    self._turn_index.pop(sid, None)
+                    self._prefetched.pop(sid, None)
             self._last_injected_count = None
 
     def shutdown(self) -> None:
-        t = self._sync_thread
-        if t is not None and t.is_alive():
-            t.join(timeout=_SYNC_JOIN_TIMEOUT)
+        # Drain EVERY in-flight capture (not just the newest) before the
+        # shared client closes underneath them; one overall time budget.
+        import time as _time
+
+        with self._lock:
+            pending = [t for t in self._sync_threads if t.is_alive()]
+            self._sync_threads = []
+        deadline = _time.monotonic() + _SYNC_JOIN_TIMEOUT
+        for t in pending:
+            t.join(timeout=max(0.0, deadline - _time.monotonic()))
         if self._client is not None:
             self._client.close()
             self._client = None

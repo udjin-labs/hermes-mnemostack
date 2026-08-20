@@ -77,3 +77,27 @@ def test_service_errors_are_clean(service_app):
 def test_base_url_required_without_injection():
     with pytest.raises(MnemostackClientError, match="base_url"):
         RemoteClient("")
+
+
+def test_oversized_item_rides_chunking_not_a_400(service_app):
+    """R1 (agent P1): 40k-char assistant turn previously 400-failed the
+    whole batch, losing BOTH sides. chunk:true must kick in."""
+    app, _store, _emb, keys = service_app
+    c = _client(app, keys["alpha"])
+    big = "long assistant answer " * 2000  # > 32768 chars
+    out = c.remember(
+        [MemoryItem(text="short user question", source="chat/2", offset=0),
+         MemoryItem(text=big, source="chat/2", offset=1)]
+    )
+    assert out.failed == 0 and out.stored > 2
+    assert any("short user question" in h.text for h in c.recall("short user question"))
+
+
+def test_client_error_carries_status_code(service_app):
+    app, _store, _emb, keys = service_app
+    c = _client(app, keys["alpha"])
+    try:
+        c.invalidate(["not-a-uuid"])
+        raise AssertionError("expected MnemostackClientError")
+    except MnemostackClientError as e:
+        assert e.status_code == 400

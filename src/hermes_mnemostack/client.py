@@ -24,7 +24,19 @@ logger = logging.getLogger(__name__)
 
 class MnemostackClientError(RuntimeError):
     """A transport-level or service-reported failure, with a caller-safe
-    message (no stack traces or secrets)."""
+    message (no stack traces or secrets). ``status_code`` carries the
+    HTTP status when the service answered (None for transport errors) so
+    callers can distinguish permanent conditions (401 revoked key, 507
+    quota) from transient ones (429/503) without parsing the message."""
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+#: Mirror of the service's per-item text cap (REMOTE_MAX_TEXT_CHARS):
+#: longer items must ride chunk=true or the whole batch 400s.
+REMOTE_TEXT_CAP = 32768
 
 
 @dataclass(frozen=True)
@@ -115,7 +127,8 @@ class RemoteClient:
                 pass
             raise MnemostackClientError(
                 f"mnemostack service returned {resp.status_code} for {path}"
-                + (f": {detail}" if detail else "")
+                + (f": {detail}" if detail else ""),
+                status_code=resp.status_code,
             )
         return resp.json()
 
@@ -137,6 +150,17 @@ class RemoteClient:
             for r in data.get("results", [])
         ]
 
+    @staticmethod
+    def _chunkable(it: MemoryItem) -> MemoryItem:
+        """The chunk contract requires offset 0 (chunk offsets are computed
+        server-side) — for a long item at a non-zero offset, fold the
+        offset into the source so the deterministic id stays unique."""
+        if len(it.text) <= REMOTE_TEXT_CAP or it.offset == 0:
+            return it
+        from dataclasses import replace
+
+        return replace(it, source=f"{it.source}#o{it.offset}", offset=0)
+
     def remember(self, items: list[MemoryItem]) -> RememberOutcome:
         payload = {
             "items": [
@@ -147,8 +171,11 @@ class RemoteClient:
                     **({"timestamp": it.timestamp} if it.timestamp else {}),
                     **({"tags": it.tags} if it.tags else {}),
                     **({"metadata": it.metadata} if it.metadata else {}),
+                    # Long items ride the server-side chunker instead of
+                    # 400-failing the whole batch on the per-item cap.
+                    **({"chunk": True} if len(it.text) > REMOTE_TEXT_CAP else {}),
                 }
-                for it in items
+                for it in (self._chunkable(i) for i in items)
             ]
         }
         data = self._request("POST", "/memories", payload)
@@ -181,13 +208,25 @@ class LocalClient:
     """mnemostack as a library against the agent's own Qdrant.
 
     ``scope`` (e.g. ``{"hermes_profile": "coder", "hermes_user": "u1"}``)
-    is stamped into every write's metadata and applied as a filter on
-    every recall, so profiles/users share one collection without seeing
-    each other. This is METADATA scoping in one trust domain — the id-
-    addressed lifecycle calls (invalidate/forget) are scope-checked here
-    in the client, but anyone with library access to the same Qdrant can
-    bypass it; use remote mode with service keys for a real boundary.
+    is folded into a canonical mnemostack TENANT string, which rides the
+    library's native tenant mechanism end to end: deterministic ids are
+    tenant-prefixed (two profiles ingesting the same (source, offset,
+    text) get DIFFERENT points, never a cross-profile duplicate), every
+    point is stamped with ``tenant_id``, recall filters on it, and the
+    id-addressed lifecycle calls use the store's own tenant ownership
+    guards with the remote surface's silent-skip anti-oracle semantics.
+    Still one trust domain — anyone with library access to the same
+    Qdrant can pass a different tenant; use remote mode with service
+    keys for a real boundary. Scope keys are additionally stamped as
+    plain metadata for inspectability.
     """
+
+    @staticmethod
+    def _scope_tenant(scope: dict[str, str] | None) -> str | None:
+        """Canonical, order-independent tenant string for a scope dict."""
+        if not scope:
+            return None
+        return "|".join(f"{k}={scope[k]}" for k in sorted(scope))
 
     def __init__(
         self,
@@ -217,6 +256,7 @@ class LocalClient:
             embedding_provider=self._provider, vector_store=self._store
         )
         self._scope = dict(scope or {})
+        self._tenant = self._scope_tenant(scope)
         self._overfetch = recall_limit_overfetch
 
     def recall(
@@ -224,6 +264,8 @@ class LocalClient:
     ) -> list[RecallHit]:
         merged = dict(filters or {})
         merged.update(self._scope)  # scope always wins — never widen it
+        if self._tenant is not None:
+            merged["tenant_id"] = self._tenant
         results = self._recaller.recall(
             query,
             limit=limit,
@@ -242,7 +284,12 @@ class LocalClient:
         ]
 
     def remember(self, items: list[MemoryItem]) -> RememberOutcome:
-        from mnemostack.ingest import IngestItem, ingest_remote_items
+        from mnemostack.ingest import (
+            REMOTE_MAX_TEXT_CHARS,
+            IngestItem,
+            expand_remote_items,
+            ingest_remote_items,
+        )
 
         ingest_items = []
         for it in items:
@@ -258,39 +305,51 @@ class LocalClient:
                     metadata=metadata,
                 )
             )
-        results = ingest_remote_items(self._provider, self._store, ingest_items)
+        # Same chunking escape hatch as the remote surface: an oversized
+        # item splits into fixed windows instead of failing the batch.
+        # Chunked items must sit at offset 0 (the chunker computes window
+        # offsets) — fold a non-zero offset into the source, mirroring
+        # RemoteClient._chunkable for cross-transport id parity.
+        prepared = []
+        for item in ingest_items:
+            if len(item.text) > REMOTE_MAX_TEXT_CHARS and item.offset != 0:
+                item = IngestItem(
+                    text=item.text,
+                    source=f"{item.source}#o{item.offset}",
+                    offset=0,
+                    timestamp=item.timestamp,
+                    tags=item.tags,
+                    metadata=item.metadata,
+                )
+            prepared.append(item)
+        entries = [
+            (item, len(item.text) > REMOTE_MAX_TEXT_CHARS) for item in prepared
+        ]
+        flat_items, _origins = expand_remote_items(entries)
+        results = ingest_remote_items(
+            self._provider, self._store, flat_items, tenant=self._tenant
+        )
         return RememberOutcome(
             stored=sum(r.status == "stored" for r in results),
             duplicates=sum(r.status == "duplicate" for r in results),
             failed=sum(r.status == "failed" for r in results),
         )
 
-    def _owned(self, ids: list[str]) -> list[str]:
-        """Ids from this client's scope only — mirrors the remote surface's
-        silent-skip semantics (counts are not an existence oracle)."""
-        if not self._scope:
-            return list(ids)
-        points = self._store.client.retrieve(
-            self._store.collection, ids=list(ids), with_payload=True
-        )
-        owned = []
-        for pt in points:
-            payload = getattr(pt, "payload", None) or {}
-            if all(payload.get(k) == v for k, v in self._scope.items()):
-                owned.append(str(pt.id))
-        return owned
-
     def invalidate(self, ids: list[str]) -> int:
-        owned = self._owned(ids)
-        if not owned:
-            return 0
-        return int(self._store.invalidate(owned))
+        from mnemostack.ingest import coerce_point_ids
+
+        tkw = {"tenant": self._tenant} if self._tenant is not None else {}
+        return int(
+            self._store.invalidate(coerce_point_ids(list(ids)), **tkw)
+        )
 
     def forget(self, ids: list[str]) -> int:
-        owned = self._owned(ids)
-        if not owned:
-            return 0
-        return int(self._store.delete_points(list(owned)))
+        from mnemostack.ingest import coerce_point_ids
+
+        tkw = {"tenant": self._tenant} if self._tenant is not None else {}
+        return int(
+            self._store.delete_points(coerce_point_ids(list(ids)), **tkw)
+        )
 
     def close(self) -> None:
         close = getattr(getattr(self._store, "client", None), "close", None)

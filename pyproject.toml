@@ -24,12 +24,17 @@ classifiers = [
 # hermes-agent is a true runtime dependency: the provider subclasses its
 # MemoryProvider ABC at import time. hermes-agent caps python at <3.14,
 # which pip resolves transitively — no need to repeat the cap here.
-# Floor note: 0.19 (latest on PyPI) carries the ABC but NOT the pip
-# entry-point discovery (landed in 0.20, git-only for now) — on 0.19 the
-# provider installs as a $HERMES_HOME/plugins/ directory instead.
+# Floor notes:
+# - hermes-agent 0.19 (latest on PyPI) carries the ABC but NOT the pip
+#   entry-point discovery (landed in 0.20, git-only for now) — on 0.19
+#   the provider installs as a $HERMES_HOME/plugins/ directory instead.
+# - mnemostack 2.2 ships the remote write/lifecycle surface AND the
+#   library helpers this package uses (ingest_remote_items,
+#   expand_remote_items, coerce_point_ids) — 2.1 lacks them entirely.
+#   Until 2.2 is on PyPI, install mnemostack from its main branch.
 dependencies = [
     "hermes-agent>=0.19",
-    "mnemostack>=2.1",
+    "mnemostack>=2.2",
 ]
 
 [project.optional-dependencies]

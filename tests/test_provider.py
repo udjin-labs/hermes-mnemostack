@@ -39,7 +39,9 @@ class FakeClient:
 def provider(monkeypatch, tmp_path):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("MNEMOSTACK_MODE", raising=False)
-    (tmp_path / "mnemostack.json").write_text(json.dumps({"mode": "remote"}))
+    (tmp_path / "mnemostack.json").write_text(
+        json.dumps({"mode": "remote", "base_url": "http://svc"})
+    )
     fake = FakeClient()
     import hermes_mnemostack.provider as pmod
 
@@ -52,10 +54,11 @@ def provider(monkeypatch, tmp_path):
 
 def _wait_threads(p: MnemostackProvider, timeout=3.0):
     deadline = time.monotonic() + timeout
-    for attr in ("_prefetch_thread", "_sync_thread"):
-        t = getattr(p, attr)
-        if t is not None:
-            t.join(timeout=max(0.0, deadline - time.monotonic()))
+    threads = list(p._sync_threads)
+    if p._prefetch_thread is not None:
+        threads.append(p._prefetch_thread)
+    for t in threads:
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def test_unconfigured_provider_is_unavailable(monkeypatch, tmp_path):
@@ -163,3 +166,110 @@ def test_shutdown_closes_client(provider):
     p, fake = provider
     p.shutdown()
     assert fake.closed is True
+
+
+def test_remote_mode_without_base_url_is_unavailable(monkeypatch, tmp_path):
+    """R1 (codex P2): hermes must see 'unavailable', not an initialize crash."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("MNEMOSTACK_MODE", raising=False)
+    (tmp_path / "mnemostack.json").write_text(json.dumps({"mode": "remote"}))
+    p = MnemostackProvider()
+    assert p.is_available() is False
+    assert "base_url" in p.unavailable_reason()
+
+
+def test_stale_prefetch_never_overwrites_fresher_result(provider):
+    """R1 (both reviewers, P2): an outrun earlier recall finishing AFTER a
+    newer one must not inject stale memories into the next turn."""
+    import threading as _threading
+
+    p, fake = provider
+    slow_release = _threading.Event()
+
+    class _RacingClient:
+        def recall(self, query, *, limit=5, filters=None):
+            if query == "slow-old-query":
+                slow_release.wait(timeout=5.0)
+                return [RecallHit(id="old", text="STALE memory", score=0.9)]
+            return [RecallHit(id="new", text="FRESH memory", score=0.9)]
+
+        def close(self):
+            pass
+
+    p._client = _RacingClient()
+    p.queue_prefetch("slow-old-query")  # gen 1, blocked
+    p.queue_prefetch("fresh query")     # gen 2, completes first
+    _wait_threads(p)
+    slow_release.set()  # old recall finishes AFTER the new one
+    time.sleep(0.2)
+    block = p.prefetch("fresh query")
+    assert "FRESH" in block and "STALE" not in block
+
+
+def test_batch_failure_falls_back_to_per_item(provider):
+    """R1 (agent P1 tail): one bad item must not lose the other side."""
+    p, fake = provider
+    calls = []
+
+    class _PickyClient:
+        def remember(self, items):
+            calls.append(list(items))
+            if len(items) > 1:
+                from hermes_mnemostack.client import MnemostackClientError
+
+                raise MnemostackClientError("items[1]: too big", status_code=400)
+            return RememberOutcome(stored=1, duplicates=0, failed=0)
+
+        def close(self):
+            pass
+
+    p._client = _PickyClient()
+    p.sync_turn("good user turn", "bad assistant turn")
+    _wait_threads(p)
+    # batch attempt + two per-item retries
+    assert [len(c) for c in calls] == [2, 1, 1]
+
+
+def test_shutdown_drains_all_inflight_captures(provider):
+    """R1 (both reviewers, P1/P2): shutdown must join EVERY in-flight
+    capture, not only the newest thread."""
+    import threading as _threading
+
+    p, fake = provider
+    gate = _threading.Event()
+    done = []
+
+    class _SlowClient:
+        def remember(self, items):
+            gate.wait(timeout=5.0)
+            done.append(len(items))
+            return RememberOutcome(stored=len(items), duplicates=0, failed=0)
+
+        def close(self):
+            done.append("closed")
+
+    p._client = _SlowClient()
+    p.sync_turn("turn one", "reply one")
+    p.sync_turn("turn two", "reply two")
+    assert len(p._sync_threads) == 2
+    gate.set()
+    p.shutdown()
+    # Both captures completed BEFORE the client closed.
+    assert done == [2, 2, "closed"]
+
+
+def test_sessions_do_not_share_prefetch_or_turn_state(provider):
+    """R1 (agent P2 tail): per-session keying — one session's recall block
+    and turn numbering must not leak into another."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="session A memory", score=0.9)]
+    p.queue_prefetch("what did we decide?", session_id="A")
+    _wait_threads(p)
+    # B sees nothing of A's block.
+    assert p.prefetch("what did we decide?", session_id="B") == ""
+    assert "session A memory" in p.prefetch("what did we decide?", session_id="A")
+    p.sync_turn("u", "a", session_id="A")
+    p.sync_turn("u2", "a2", session_id="B")
+    _wait_threads(p)
+    offsets = {batch[0].source: batch[0].offset for batch in fake.remembered}
+    assert offsets["hermes/cli/A"] == 0 and offsets["hermes/cli/B"] == 0
