@@ -1087,3 +1087,23 @@ def test_block_echo_with_a_wordless_addition_collapses(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert any("noted for later" in t for t in stored)
     assert not any("recalled fact" in t for t in stored)
+
+
+def test_block_of_short_memories_echoes_through_the_probe_path(provider):
+    """R8 (agent P3): a block whose memories are ALL below the short-span
+    threshold exercises the probe path, not long-span masking — that
+    branch was correct but untested."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="see PR #157", score=0.9),
+        RecallHit(id="2", text="ping @ops", score=0.8),
+    ]
+    p.queue_prefetch("what were the two notes?")
+    _wait_threads(p)
+    block = p.prefetch("what were the two notes?")
+    assert all(len(h.text) < 24 for h in fake.hits)  # probe path, by construction
+    fake.remembered.clear()
+    p.sync_turn(block, "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert stored == ["ack"]  # the block echo contributed no words of its own
