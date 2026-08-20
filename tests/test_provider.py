@@ -997,9 +997,12 @@ def test_wordless_memory_echo_is_still_suppressed(provider):
     assert roles == ["assistant"]  # the echoed 👍 is suppressed
 
 
-def test_reaction_in_the_same_string_as_an_echo_survives(provider):
-    """R7 (agent P1): a reaction sent in the SAME message as a quoted
-    recalled fact is the user's own content — only the echo goes."""
+def test_wordless_addition_to_a_complete_echo_is_dropped(provider):
+    """R9 contract: coverage by WORDS decides. A turn contributing no
+    words of its own is an echo however it was framed — including when a
+    wordless reaction rides along. Documented residual: that reaction is
+    lost, which is bounded and preferable to re-storing recalled text
+    (which compounds). Contrast with the mixed-content pin below."""
     p, fake = provider
     fact = "the release checklist lives in the ops handbook appendix"
     fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
@@ -1010,7 +1013,14 @@ def test_reaction_in_the_same_string_as_an_echo_survives(provider):
     p.sync_turn(f"{fact} 👍", f"👍 {fact}")
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
-    assert stored == ["👍", "👍"]  # echoes removed, reactions kept
+    assert stored == []  # no words of their own → pure echoes
+    # But a turn with ANY word of its own keeps that word.
+    fake.remembered.clear()
+    p.sync_turn(f"{fact} — thanks", "ok")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("thanks" in t for t in stored)
+    assert not any("release checklist" in t for t in stored)
 
 
 def test_block_echo_leaves_no_bullet_residue(provider):
@@ -1038,7 +1048,14 @@ def test_formatted_short_echo_still_collapses(provider):
     p.queue_prefetch("which PR was that?")
     _wait_threads(p)
     p.prefetch("which PR was that?")
-    for shape in ('"see PR #157"', "- see PR #157", "`see PR #157`"):
+    for shape in (
+        '"see PR #157"',
+        "- see PR #157",
+        "`see PR #157`",
+        "_see PR #157_",
+        "~~see PR #157~~",
+        "{see PR #157}",
+    ):
         fake.remembered.clear()
         p.sync_turn(shape, "ack")
         _wait_threads(p)
@@ -1046,9 +1063,10 @@ def test_formatted_short_echo_still_collapses(provider):
         assert not any("PR #157" in t for t in stored), shape
 
 
-def test_reaction_appended_to_a_block_echo_survives(provider):
-    """R8 (codex P2): dropping bullet residue must not drop the caller's
-    own reaction sent with the echoed block."""
+def test_block_echo_with_a_wordless_addition_collapses(provider):
+    """R9 contract: an echoed block plus a wordless reaction contributes
+    no words of its own — dropped as a pure echo (documented residual).
+    A block echo plus real words keeps the words."""
     p, fake = provider
     fake.hits = [
         RecallHit(id="1", text="first recalled fact about deploys", score=0.9),
@@ -1061,5 +1079,11 @@ def test_reaction_appended_to_a_block_echo_survives(provider):
     p.sync_turn(f"{block} 👍", "ack")
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
-    assert "👍" in stored
+    assert not any("recalled fact" in t for t in stored)
+    assert "👍" not in stored  # wordless addition rides along with the echo
+    fake.remembered.clear()
+    p.sync_turn(f"{block} noted for later", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("noted for later" in t for t in stored)
     assert not any("recalled fact" in t for t in stored)

@@ -70,21 +70,29 @@ FENCE_CLOSE = "\u23a3 end recalled memory \u23a6"
 #: same fact). Also caps the per-session set size.
 _INJECTED_MEMORY_TURNS = 8
 _INJECTED_MEMORY_MAX = 128
-#: Characters our own recall block contributes around memories (bullets)
-#: plus the quoting/markup a caller adds when echoing one. Residue made
-#: ONLY of these carries no content: it is presentation, not memory.
-_PRESENTATION_CHARS = "-•*|>#`\"'“”‘’«»()[]{}"
+def _is_pure_echo(content: str, mask: bytearray) -> bool:
+    """Whether every WORD in this turn came from recalled content.
 
+    The contract is word coverage, deliberately NOT a taxonomy of
+    "presentation" characters: any such list is endlessly incomplete in
+    both directions (markdown wrappers keep appearing, and braces or
+    brackets can be real content). If a turn contributes no words of its
+    own beyond what was recalled, it is an echo however it was framed —
+    quoted, bulleted, italicized, or bare.
 
-def _meaningful(text: str) -> str:
-    """Text with presentation artifacts and whitespace removed.
-
-    Emoji and words survive; bullets, quotes and brackets do not. Used to
-    decide whether what remains after removing echoes is the caller's own
-    content or just the formatting they wrapped it in."""
-    return "".join(
-        ch for ch in text if not ch.isspace() and ch not in _PRESENTATION_CHARS
-    )
+    Documented residual: a WORDLESS addition (an emoji or punctuation)
+    sent together with an otherwise complete echo is dropped with it.
+    That is a bounded, one-turn loss of a low-signal reaction, and it is
+    preferable to re-storing recalled content, which compounds.
+    """
+    words = [i for i, ch in enumerate(content) if ch.isalnum()]
+    if not words:
+        # No words at all: an echo only if literally everything non-space
+        # was recalled (a stored "👍" re-sent verbatim).
+        return all(
+            mask[i] for i, ch in enumerate(content) if not ch.isspace()
+        ) and any(not ch.isspace() for ch in content)
+    return all(mask[i] for i in words)
 
 
 #: A recalled span is only worth suppressing if it carries content; a
@@ -568,9 +576,7 @@ class MnemostackProvider(MemoryProvider):
                         probe[j] = 1
                     matched_short = True
                     start_at = i + len(text)
-            # Formatting-tolerant: a short echo wrapped in quotes or a
-            # bullet ('"see PR #157"') is still a pure echo.
-            if (removed or matched_short) and not _meaningful(_residual(probe)):
+            if (removed or matched_short) and _is_pure_echo(content, probe):
                 return ""
 
         if not removed:
@@ -579,14 +585,11 @@ class MnemostackProvider(MemoryProvider):
             # block and table, and would drop punctuation/emoji-only turns
             # for 8 turns after any recall.)
             return content
+        if _is_pure_echo(content, mask):
+            return ""
         out = " ".join(_residual(mask).split())
-        if fence_echoed:
-            # Our own block bullets are not the caller's content — drop
-            # artifact-only tokens, keep everything else (a "👍" appended
-            # to an echoed block is still the caller's reaction).
-            out = " ".join(tok for tok in out.split() if _meaningful(tok))
-        if not _meaningful(out):
-            return ""  # nothing but recalled spans and presentation
+        if not out:
+            return ""
         logger.debug(
             "mnemostack capture: removed recalled span(s) from a %s-char turn",
             len(content),
