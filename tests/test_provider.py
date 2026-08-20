@@ -519,15 +519,24 @@ def test_empty_followup_clears_stale_block(provider):
 
 
 def test_eviction_removes_a_session_from_every_dict(provider):
-    """R5 (codex P2): the victim leaves ALL state dicts at once —
-    per-dict eviction desynced turn counters from blocks."""
+    """R5/R6 (codex P2 + agent revert-probe): the victim leaves ALL state
+    dicts at once. All four dicts are populated with DIFFERENT recency
+    orders, so per-dict eviction would keep different survivors while
+    session-level eviction keeps one consistent set."""
     p, fake = provider
+    fake.hits = [RecallHit(id="x", text="block", score=0.9)]
+    sessions = [f"sess-{i}" for i in range(4)]
+    for sid in sessions:  # prefetch recency: 0,1,2,3
+        p.queue_prefetch(f"question for {sid}", session_id=sid)
+        _wait_threads(p)
+    for sid in reversed(sessions):  # turn recency: 3,2,1,0 — differs
+        p.sync_turn("u", "a", session_id=sid)
+    _wait_threads(p)
     p._MAX_SESSION_STATES = 1
-    for i in range(4):
-        p.sync_turn(f"u{i}", f"a{i}", session_id=f"sess-{i}")
+    p.sync_turn("more", "turns", session_id="sess-3")  # triggers prune
     _wait_threads(p)
     with p._lock:
-        keys = set(p._turn_index)
-        assert len(keys) <= 1
-        for d in (p._prefetched, p._prefetch_gen, p._prefetch_threads):
-            assert set(d) <= keys | set()
+        survivors = set(p._turn_index)
+        assert len(survivors) <= 2  # bound applied (+the protected sid)
+        assert set(p._prefetched) <= survivors
+        assert set(p._prefetch_gen) <= survivors

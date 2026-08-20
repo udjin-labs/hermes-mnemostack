@@ -162,16 +162,6 @@ class MnemostackProvider(MemoryProvider):
         if client is None or is_trivial_prompt(query):
             return
         key = session_id or ""
-        with self._lock:
-            # Generation gate: an outrun earlier recall finishing AFTER a
-            # newer one must not overwrite the fresher block with stale
-            # memories for a previous query. pop-then-assign refreshes the
-            # key's recency for the LRU bound (plain assignment would not).
-            self._prefetch_gen_counter += 1
-            gen = self._prefetch_gen_counter
-            self._prefetch_gen.pop(key, None)
-            self._prefetch_gen[key] = gen
-            self._prune_session_dicts_locked(protect=key)
 
         def _run() -> None:
             try:
@@ -201,15 +191,21 @@ class MnemostackProvider(MemoryProvider):
 
         t = threading.Thread(target=_run, daemon=True, name="mnemostack-prefetch")
         with self._lock:
-            # Per-SESSION thread reference: joining some other session's
-            # thread would return this session's block as empty while its
-            # own recall is still in flight. Registered AND started under
-            # the same lock as the prune above released — protection keys
-            # on REGISTRATION (dict membership), so there is no gap where
-            # another session's prune can evict this key's generation
-            # before its thread exists.
+            # ONE uninterrupted critical section for gen-assign, prune,
+            # registration, and start — any split leaves a window where
+            # another session's prune sees this key's fresh generation
+            # with no thread registered and evicts it, orphaning the
+            # recall (round-6, reproduced by both reviewers). The worker
+            # reads `gen` only after start(), which follows the
+            # assignment inside this same block. pop-then-assign
+            # refreshes LRU recency (plain assignment would not).
+            self._prefetch_gen_counter += 1
+            gen = self._prefetch_gen_counter
+            self._prefetch_gen.pop(key, None)
+            self._prefetch_gen[key] = gen
             self._prefetch_threads.pop(key, None)
             self._prefetch_threads[key] = t
+            self._prune_session_dicts_locked(protect=key)
             t.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
