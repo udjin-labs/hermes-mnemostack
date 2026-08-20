@@ -103,25 +103,55 @@ def test_client_error_carries_status_code(service_app):
         assert e.status_code == 400
 
 
-def test_routine_notes_are_not_reported_as_faults(service_app):
-    """mnemostack 2.2 duplicates routine `notes` tags into `degraded` for
-    back-compat until the next major — a real fault is exactly
-    degraded-minus-notes. Reporting all of `degraded` would flag healthy
-    recalls as broken."""
+def test_routine_notes_are_not_reported_as_faults():
+    """R4 (agent P2): pin the CONTRACT against a controlled response, not
+    against whatever a live deployment happens to emit — mnemostack 2.2
+    duplicates routine `notes` tags into `degraded` for back-compat, so a
+    real fault is exactly degraded-minus-notes."""
     from hermes_mnemostack.client import real_faults
 
-    app, _store, _emb, keys = service_app
-    c = _client(app, keys["alpha"])
-    c.remember([MemoryItem(text="a fact about deploys", source="s")])
-    # A query with no parsable time expression emits the routine
-    # temporal:no_parse signal on a real service.
-    out = c.recall_detailed("deploys", limit=5)
-    assert out.faults == [] or all(f not in out.notes for f in out.faults)
-    for note in out.notes:
-        assert note not in out.faults
+    class _FakeResponse:
+        status_code = 200
 
-    # Unit contract, independent of what this deployment happens to emit.
+        def __init__(self, payload):
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _FakeHTTP:
+        def __init__(self, payload):
+            self._payload = payload
+            self.calls = []
+
+        def request(self, method, path, json=None, headers=None):
+            self.calls.append((method, path))
+            return _FakeResponse(self._payload)
+
+    # Healthy recall carrying a routine signal in BOTH lists.
+    http = _FakeHTTP(
+        {
+            "results": [{"id": "1", "text": "a memory", "score": 0.5}],
+            "notes": ["temporal:no_parse"],
+            "degraded": ["temporal:no_parse"],
+        }
+    )
+    out = RemoteClient("http://svc", http=http).recall_detailed("q")
+    assert out.notes == ["temporal:no_parse"]
+    assert out.faults == []  # routine duplicate is NOT a fault
+    assert len(out.hits) == 1
+
+    # A genuine fault: present in degraded, absent from notes.
+    http = _FakeHTTP(
+        {
+            "results": [],
+            "notes": ["temporal:no_parse"],
+            "degraded": ["temporal:no_parse", "vector:error"],
+        }
+    )
+    out = RemoteClient("http://svc", http=http).recall_detailed("q")
+    assert out.faults == ["vector:error"]
+
+    # Unit contract, independent of transport.
     assert real_faults(["temporal:no_parse"], ["temporal:no_parse"]) == []
-    assert real_faults(["vector:error", "temporal:no_parse"], ["temporal:no_parse"]) == [
-        "vector:error"
-    ]
+    assert real_faults(["vector:error"], []) == ["vector:error"]

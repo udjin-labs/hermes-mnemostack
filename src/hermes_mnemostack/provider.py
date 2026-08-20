@@ -462,50 +462,86 @@ class MnemostackProvider(MemoryProvider):
             turn = self._turn_index.get(key, 0)
         if not seen:
             return content
+        fresh = [
+            text
+            for text, injected_turn in seen.items()
+            if turn - injected_turn <= _INJECTED_MEMORY_TURNS
+        ]
+        if not fresh:
+            return content
         # Spans are located in the ORIGINAL text and masked — never by
-        # rewriting `out` in place: replacing one span can splice its
+        # rewriting the output in place: replacing one span can splice its
         # neighbours into a byte sequence that equals ANOTHER tracked
         # span, which would then be cut although the user never wrote it.
         mask = bytearray(len(content))
-        removed = False
 
         def _mask(span: str) -> bool:
             hit = False
-            start = 0
+            start_at = 0
             while True:
-                i = content.find(span, start)
+                i = content.find(span, start_at)
                 if i < 0:
                     return hit
                 for j in range(i, i + len(span)):
                     mask[j] = 1
                 hit = True
-                start = i + len(span)
+                start_at = i + len(span)
 
-        for text, injected_turn in sorted(
-            seen.items(), key=lambda kv: len(kv[0]), reverse=True
-        ):
-            if turn - injected_turn > _INJECTED_MEMORY_TURNS:
-                continue  # too old to be an echo of this conversation
-            if len(text) < _MIN_SUPPRESSED_SPAN:
-                # Short spans still suppress an EXACT whole-turn echo, but
-                # are not cut out of a longer utterance (coincidence).
-                if " ".join(content.split()) == text:
-                    return ""
-                continue
+        def _residual(m: bytearray) -> str:
+            # Masked runs become a SPACE, never nothing: deleting them
+            # outright would fuse the surrounding words into one token.
+            out_parts: list[str] = []
+            prev_masked = False
+            for ch, masked in zip(content, m, strict=True):
+                if masked:
+                    prev_masked = True
+                    continue
+                if prev_masked:
+                    out_parts.append(" ")
+                    prev_masked = False
+                out_parts.append(ch)
+            return "".join(out_parts)
+
+        long_spans = sorted(
+            (t for t in fresh if len(t) >= _MIN_SUPPRESSED_SPAN), key=len, reverse=True
+        )
+        short_spans = sorted(
+            (t for t in fresh if len(t) < _MIN_SUPPRESSED_SPAN), key=len, reverse=True
+        )
+        removed = False
+        for text in long_spans:
             removed |= _mask(text)
         # Fence markers are presentation-only; if a whole block bounced
         # back, its markers are noise in the captured text.
         for marker in (FENCE_OPEN, FENCE_CLOSE):
             removed |= _mask(marker)
+
+        # Short spans are NOT cut out of real content (a few words
+        # appearing mid-sentence is coincidence, not an echo) — but a turn
+        # whose ENTIRE remainder is short recalled spans is a pure echo,
+        # so they are evaluated against the post-mask residual, not the
+        # raw text (a long span alongside a short one used to leak).
+        if short_spans:
+            probe = bytearray(mask)
+            for text in short_spans:
+                start_at = 0
+                while True:
+                    i = content.find(text, start_at)
+                    if i < 0:
+                        break
+                    for j in range(i, i + len(text)):
+                        probe[j] = 1
+                    start_at = i + len(text)
+            if not any(ch.isalnum() for ch in _residual(probe)):
+                return ""
+
         if not removed:
             # Nothing was an echo — capture stays VERBATIM. (Normalizing
             # unconditionally would flatten every multi-line message, code
             # block and table, and would drop punctuation/emoji-only turns
             # for 8 turns after any recall.)
             return content
-        out = " ".join(
-            "".join(ch for ch, m in zip(content, mask, strict=True) if not m).split()
-        )
+        out = " ".join(_residual(mask).split())
         # What survives a full block echo is list punctuation ("- -") —
         # residue with no word characters carries no memory worth storing.
         if not any(ch.isalnum() for ch in out):

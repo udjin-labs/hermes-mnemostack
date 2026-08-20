@@ -309,10 +309,22 @@ class LocalClient:
     def recall(
         self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
     ) -> list[RecallHit]:
-        return self.recall_detailed(query, limit=limit, filters=filters).hits
+        # No trace: a RecallTrace makes the recaller build per-retriever
+        # ranked lists and a fused list this caller would discard.
+        return self._recall(query, limit=limit, filters=filters, trace=False).hits
 
     def recall_detailed(
         self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
+    ) -> RecallOutcome:
+        return self._recall(query, limit=limit, filters=filters, trace=True)
+
+    def _recall(
+        self,
+        query: str,
+        *,
+        limit: int = 5,
+        filters: dict[str, Any] | None = None,
+        trace: bool = True,
     ) -> RecallOutcome:
         merged = dict(filters or {})
         merged.update(self._scope)  # scope always wins — never widen it
@@ -321,18 +333,20 @@ class LocalClient:
         # the recaller's filter_by_tenant backstop — a future bm25/graph
         # arm stays isolated automatically.
         tkw: dict[str, Any] = {"tenant": self._tenant} if self._tenant is not None else {}
-        from mnemostack.recall import RecallTrace
+        rt = None
+        if trace:
+            from mnemostack.recall import RecallTrace
 
-        trace = RecallTrace()
+            rt = RecallTrace()
+            tkw["trace"] = rt
         results = self._recaller.recall(
             query,
             limit=limit,
             vector_limit=max(limit, self._overfetch),
             filters=merged or None,
-            trace=trace,
             **tkw,
         )
-        notes = [str(n) for n in getattr(trace, "notes", [])]
+        notes = [str(n) for n in getattr(rt, "notes", [])] if rt is not None else []
         return RecallOutcome(
             hits=[
                 RecallHit(
@@ -345,7 +359,8 @@ class LocalClient:
                 for r in results
             ],
             faults=real_faults(
-                [str(d) for d in getattr(trace, "degraded", [])], notes
+                [str(d) for d in getattr(rt, "degraded", [])] if rt is not None else [],
+                notes,
             ),
             notes=notes,
         )

@@ -874,20 +874,55 @@ def test_removal_cannot_synthesize_a_false_match(provider):
 
 
 def test_provenance_eviction_uses_the_shared_prune(provider):
-    """R3 (agent P2): ONE eviction policy — provenance is evicted with the
-    rest of a session's state, never on its own. A second local loop
-    pruned only _recently_injected, so an active session could lose its
-    provenance while the rest of its state survived."""
+    """R3/R4 (agent, revert-verified): ONE eviction policy. Provenance is
+    recorded directly here so queue_prefetch's own prune cannot mask the
+    difference: a session PROTECTED by an unconsumed block must keep its
+    provenance, which the removed local-only prune did not honor."""
     p, fake = provider
-    p._MAX_SESSION_STATES = 3
-    fake.hits = [RecallHit(id="1", text="a memory long enough to track", score=0.9)]
-    for i in range(8):
-        sid = f"sess-{i}"
-        p.queue_prefetch(f"question for {sid}", session_id=sid)
-        _wait_threads(p)
-        p.prefetch(f"question for {sid}", session_id=sid)  # consume → provenance
+    p._MAX_SESSION_STATES = 2
     with p._lock:
-        # Session-level eviction keeps the two dicts in lockstep; per-dict
-        # pruning of provenance alone would leave gens without provenance.
-        assert set(p._recently_injected) == set(p._prefetch_gen)
-        assert len(p._recently_injected) <= 2 * p._MAX_SESSION_STATES
+        # 'keep' holds an undelivered block → protected by the shared prune.
+        p._prefetched["keep"] = ("block", 1, ("a tracked memory span here",))
+        p._note_injected_locked("keep", ("a tracked memory span here",))
+        for i in range(6):  # churn other sessions' provenance
+            p._note_injected_locked(f"filler-{i}", (f"filler memory number {i}",))
+    with p._lock:
+        assert "keep" in p._recently_injected  # protection honored
+        assert "keep" in p._prefetched  # and its state stayed coherent
+
+
+def test_mixed_length_echo_leaves_nothing_behind(provider):
+    """R4 (agent P1): a turn echoing a LONG and a SHORT recalled span must
+    collapse to nothing — the short-span check used to compare against the
+    raw turn, so it never fired once a long span was present."""
+    p, fake = provider
+    long_fact = "the staging cluster lives in eu-central-1 behind the proxy"
+    short_fact = "see PR #157"
+    fake.hits = [
+        RecallHit(id="1", text=long_fact, score=0.9),
+        RecallHit(id="2", text=short_fact, score=0.8),
+    ]
+    p.queue_prefetch("where is staging?")
+    _wait_threads(p)
+    p.prefetch("where is staging?")
+    fake.remembered.clear()
+    p.sync_turn(f"{long_fact} {short_fact}", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert not any("eu-central-1" in t or "PR #157" in t for t in stored)
+
+
+def test_masking_keeps_a_word_boundary(provider):
+    """R4 (agent P3): masked spans become a space — deleting them outright
+    fused the surrounding words into one unreadable token."""
+    p, fake = provider
+    span = "y" * 40
+    fake.hits = [RecallHit(id="1", text=span, score=0.9)]
+    p.queue_prefetch("give me the span")
+    _wait_threads(p)
+    p.prefetch("give me the span")
+    fake.remembered.clear()
+    p.sync_turn(f"before{span}after", "ok")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("before after" in t for t in stored)
