@@ -171,9 +171,6 @@ class MnemostackProvider(MemoryProvider):
             gen = self._prefetch_gen_counter
             self._prefetch_gen.pop(key, None)
             self._prefetch_gen[key] = gen
-            # protect=key: the freshly queued session's thread is not
-            # registered yet — without protection an all-live prune would
-            # evict this very generation and orphan the recall it started.
             self._prune_session_dicts_locked(protect=key)
 
         def _run() -> None:
@@ -184,12 +181,16 @@ class MnemostackProvider(MemoryProvider):
                 hits = []
             block = self._format_hits(hits)
             with self._lock:
-                # Empty results are not cached: there is nothing to inject,
-                # and an empty entry would pointlessly PROTECT the session
-                # from LRU eviction, starving real victims.
-                if self._prefetch_gen.get(key) == gen and block:
+                if self._prefetch_gen.get(key) == gen:
+                    # ALWAYS clear the previous block on a gen match — a
+                    # later query that legitimately found nothing must not
+                    # leave the prior turn's block to be injected as if
+                    # fresh. Empty results are cleared but not cached
+                    # (nothing to inject; an empty entry would pointlessly
+                    # protect the session from LRU eviction).
                     self._prefetched.pop(key, None)
-                    self._prefetched[key] = (block, len(hits))
+                    if block:
+                        self._prefetched[key] = (block, len(hits))
                 # Completed worker cleans up after itself: drop the dead
                 # thread reference and re-prune, so a burst past the bound
                 # shrinks back once it drains instead of lingering until
@@ -202,10 +203,14 @@ class MnemostackProvider(MemoryProvider):
         with self._lock:
             # Per-SESSION thread reference: joining some other session's
             # thread would return this session's block as empty while its
-            # own recall is still in flight.
+            # own recall is still in flight. Registered AND started under
+            # the same lock as the prune above released — protection keys
+            # on REGISTRATION (dict membership), so there is no gap where
+            # another session's prune can evict this key's generation
+            # before its thread exists.
             self._prefetch_threads.pop(key, None)
             self._prefetch_threads[key] = t
-        t.start()
+            t.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Serve the cached background result; if the thread is still in
@@ -383,35 +388,47 @@ class MnemostackProvider(MemoryProvider):
         oldest entry goes regardless, loudly — abandoned sessions must
         not accumulate forever on a server host. Caller holds the lock."""
 
-        def _protected(key: str) -> bool:
-            if key == protect:
-                return True
-            t = self._prefetch_threads.get(key)
-            if t is not None and t.is_alive():
-                return True
-            return key in self._prefetched  # ready, not yet delivered
-
-        for d in (
+        all_dicts = (
             self._turn_index,
             self._prefetched,
             self._prefetch_gen,
             self._prefetch_threads,
-        ):
+        )
+
+        def _protected(key: str) -> bool:
+            # Registration MEMBERSHIP, not aliveness: a registered thread
+            # is either about to run or running; completed workers remove
+            # their own entry, so membership stays bounded by real
+            # concurrency. Unconsumed blocks are work not yet delivered.
+            return (
+                key == protect
+                or key in self._prefetch_threads
+                or key in self._prefetched
+            )
+
+        def _evict(victim: str) -> None:
+            # SESSION-level eviction: one victim leaves every dict at
+            # once — per-dict eviction could drop one session's turn
+            # counter and another's block, restarting capture offsets.
+            for d in all_dicts:
+                d.pop(victim, None)
+
+        for d in all_dicts:
             while len(d) > self._MAX_SESSION_STATES:
                 victim = next((k for k in d if not _protected(k)), None)
                 if victim is None:
                     if len(d) > 2 * self._MAX_SESSION_STATES:
-                        # Hard cap may override BLOCK protection (oldest
-                        # undelivered block goes) but never a live thread
-                        # (its join bookkeeping must stay intact) nor the
-                        # in-progress key.
-                        def _hard_evictable(k: str) -> bool:
-                            if k == protect:
-                                return False
-                            t = self._prefetch_threads.get(k)
-                            return not (t is not None and t.is_alive())
-
-                        victim = next((k for k in d if _hard_evictable(k)), None)
+                        # Hard cap may override BLOCK protection (the
+                        # oldest undelivered block goes, loudly) but never
+                        # a registered thread nor the in-progress key.
+                        victim = next(
+                            (
+                                k
+                                for k in d
+                                if k != protect and k not in self._prefetch_threads
+                            ),
+                            None,
+                        )
                         if victim is None:
                             break
                         logger.warning(
@@ -420,7 +437,7 @@ class MnemostackProvider(MemoryProvider):
                         )
                     else:
                         break  # protected set within tolerance — hold
-                d.pop(victim)
+                _evict(victim)
 
     def shutdown(self) -> None:
         # Drain EVERY in-flight capture (not just the newest) before the

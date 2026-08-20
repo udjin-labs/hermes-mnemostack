@@ -367,7 +367,7 @@ def test_session_churn_never_evicts_inflight_prefetch(provider):
             if "active" in query:
                 release.wait(timeout=5.0)
                 return [RecallHit(id="a", text="active block", score=0.9)]
-            return []
+            return [RecallHit(id="f", text="filler block", score=0.5)]
 
         def close(self):
             pass
@@ -379,6 +379,26 @@ def test_session_churn_never_evicts_inflight_prefetch(provider):
         p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
     release.set()
     assert "active block" in p.prefetch("active slow question", session_id="active")
+
+
+def test_unconsumed_block_protection_is_load_bearing(provider):
+    """R5 (agent): fillers must CACHE blocks so _prefetched actually grows
+    past the cap — otherwise the block-protection branch is never taken
+    and the pin is vacuous."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="v", text="victim cached block", score=0.9)]
+    p._MAX_SESSION_STATES = 2
+    p.queue_prefetch("victim question", session_id="victim")
+    _wait_threads(p)  # completed, cached, NOT consumed
+    fake.hits = [RecallHit(id="f", text="filler block", score=0.5)]
+    # Three fillers: cache grows past the soft cap (2) but stays within
+    # the 2x hard-cap tolerance, where block protection must hold.
+    for i in range(3):
+        p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
+        _wait_threads(p)
+    with p._lock:
+        assert len(p._prefetched) > 2  # cache genuinely grew past the cap
+    assert "victim cached block" in p.prefetch("victim question", session_id="victim")
 
 
 def test_generations_survive_reset_and_eviction(provider):
@@ -481,3 +501,33 @@ def test_fresh_queue_survives_all_protected_prune(provider):
     p.queue_prefetch("second question", session_id="two")  # must survive queueing
     release.set()
     assert "second question" in p.prefetch("second question", session_id="two")
+
+
+def test_empty_followup_clears_stale_block(provider):
+    """R5 (both reviewers, P1): a later query that legitimately finds
+    nothing must not leave the prior turn's block to be injected as if
+    fresh."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="SECRET turn-1 memory", score=0.9)]
+    p.queue_prefetch("first question", session_id="s")
+    _wait_threads(p)
+    fake.hits = []  # second query finds nothing
+    p.queue_prefetch("unrelated second question", session_id="s")
+    _wait_threads(p)
+    assert p.prefetch("unrelated second question", session_id="s") == ""
+    assert p.recall_status() is None
+
+
+def test_eviction_removes_a_session_from_every_dict(provider):
+    """R5 (codex P2): the victim leaves ALL state dicts at once —
+    per-dict eviction desynced turn counters from blocks."""
+    p, fake = provider
+    p._MAX_SESSION_STATES = 1
+    for i in range(4):
+        p.sync_turn(f"u{i}", f"a{i}", session_id=f"sess-{i}")
+    _wait_threads(p)
+    with p._lock:
+        keys = set(p._turn_index)
+        assert len(keys) <= 1
+        for d in (p._prefetched, p._prefetch_gen, p._prefetch_threads):
+            assert set(d) <= keys | set()
