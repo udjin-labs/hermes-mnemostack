@@ -701,3 +701,35 @@ def test_no_invisible_control_survives_a_row():
     assert cli._row_text("\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587") == (
         "\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587"
     )
+
+
+def test_a_server_cannot_pad_a_diagnosis_out_of_the_report(tmp_path, capsys):
+    """R11 (review agent P2): the row is composed as "<our words><their
+    value><our words>", and the row cap cuts from the tail — so a padded
+    `version` pushed the clause that names the ACTUAL fault ("qdrant
+    unreachable") past the cutoff while the padding itself survived. The
+    server got to choose which half of the diagnosis the operator sees."""
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    rc = cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_forging_http({"status": "degraded", "version": "v" * 280, "qdrant": False}),
+    )
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "qdrant unreachable" in out
+    # And the padding is bounded rather than spending the whole row.
+    assert "v" * 100 not in out
+
+
+def test_a_padded_degradation_tag_cannot_push_out_the_remedy(tmp_path, capsys):
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_forging_http(
+            {"status": "ok", "version": "2.2.0"},
+            {"results": [], "degraded": ["x" * 500], "notes": []},
+        ),
+    )
+    out = capsys.readouterr().out
+    assert "check the service log" in out
+    assert "x" * 100 not in out

@@ -80,13 +80,33 @@ def _row_text(value: Any) -> str:
     degradation tag — cannot forge structure no matter which call site it
     travelled through.
     """
+    # Cut BEFORE scrubbing: the scrub is 1:1 per character, so slicing
+    # first is byte-for-byte the same answer without walking a field the
+    # report will never show.
+    raw = str(value)
+    ellipsis = len(raw) > _ROW_MAX_CHARS
+    if ellipsis:
+        raw = raw[: _ROW_MAX_CHARS - 1]
     cleaned = "".join(
-        " " if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch
-        for ch in str(value)
+        " " if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch for ch in raw
     )
-    if len(cleaned) > _ROW_MAX_CHARS:
-        cleaned = cleaned[: _ROW_MAX_CHARS - 1] + "\u2026"
-    return cleaned
+    return cleaned + "\u2026" if ellipsis else cleaned
+
+
+#: How much of ONE server-supplied value a row may spend. The row cap is a
+#: backstop against total length; this is the one that keeps a server from
+#: STEERING what gets cut. A row is composed as "<our words><their
+#: value><our words>", so an unbounded value pushes the trailing clause —
+#: the diagnostically important half — past the row cap and out of the
+#: report, while the value itself survives. Bounding the value instead
+#: means our own words always fit.
+_FIELD_MAX_CHARS = 80
+
+
+def _field_text(value: Any) -> str:
+    """One server-supplied value, bounded so it cannot displace our text."""
+    text = str(value)
+    return text if len(text) <= _FIELD_MAX_CHARS else text[: _FIELD_MAX_CHARS - 1] + "\u2026"
 
 
 @dataclass
@@ -425,7 +445,9 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
             "check base_url — something else is serving this path",
         )
         return
-    version = f" (mnemostack {body['version']})" if body.get("version") else ""
+    version = (
+        f" (mnemostack {_field_text(body['version'])})" if body.get("version") else ""
+    )
     if body.get("status") != "ok":
         # FAIL, not WARN: mnemostack reports `degraded` exactly when Qdrant
         # — its hard dependency — is unreachable. Recall is fail-soft and
@@ -436,7 +458,7 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
             "service",
             FAIL,
             f"{base or 'service'} reachable but reports status="
-            f"{body.get('status')!r}{version}"
+            f"{_field_text(body.get('status'))!r}{version}"
             + (" — qdrant unreachable" if body.get("qdrant") is False else ""),
             "check the service's own /health and its backing stores",
         )
@@ -521,14 +543,20 @@ def _report_degradation(report: Report, degraded: Any, notes: Any) -> None:
         report.add(
             "retrieval",
             WARN,
-            "recall reported real degradation: " + ", ".join(faults),
+            "recall reported real degradation: "
+            + _field_text(", ".join(faults)),
             "check the service log; some retrieval arm is failing, not merely idle",
         )
     else:
         report.add(
             "retrieval",
             OK,
-            "no faults" + (f" (routine notes: {', '.join(str(n) for n in notes)})" if notes else ""),
+            "no faults"
+            + (
+                f" (routine notes: {_field_text(', '.join(str(n) for n in notes))})"
+                if notes
+                else ""
+            ),
         )
 
 
