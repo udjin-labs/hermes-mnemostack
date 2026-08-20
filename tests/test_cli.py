@@ -540,6 +540,11 @@ def test_the_report_names_the_authority_and_nothing_else():
         "https://sso.invalid/health;jsessionid=SECRET",
         "/relative/SECRET",
         "file:///etc/SECRET",
+        # R7: the SCHEME itself. urlsplit's grammar is unbounded and
+        # accepts hyphens, dots and digits — wide enough for a token —
+        # and the "cannot follow" branch used to quote it back.
+        "SECRET-TOKEN-abc123.leaked://evil.invalid/x",
+        "secret" + "0" * 200 + "://evil.invalid/x",
     ]
     for loc in leaky:
         shown = cli._safe_location(loc)
@@ -577,6 +582,12 @@ def test_an_unfollowable_target_is_reported_by_shape():
     """Withheld, but not silently: the operator is told a redirect
     happened and why its target is not printed."""
     assert "cannot follow" in cli._safe_location("javascript://evil.invalid/x")
+    # ...described, never quoted: the scheme is attacker-chosen text.
+    assert "javascript" not in cli._safe_location("javascript://evil.invalid/x")
+    # A port is part of the authority — including the one Python calls falsy.
+    assert cli._safe_location("https://ok.invalid:0/x") == (
+        "https://ok.invalid:0 (path and query not shown)"
+    )
     assert "no host" in cli._safe_location("/relative/path")
     assert "malformed" in cli._safe_location("https://evil.invalid;x=1/health")
     assert "malformed" in cli._safe_location("https://evil.invalid:99999/x")

@@ -279,9 +279,10 @@ def _safe_location(location: str | None) -> str:
     this stops enumerating them.
 
     The contract: the report names the DESTINATION AUTHORITY and nothing
-    else. Printed output can only ever be one of the two literal schemes,
-    a host matching the hostname (or IPv6-literal) grammar, and a numeric
-    port. The path, query, fragment and userinfo are never shown — not
+    else. Printed output can only ever be one of the two FOLLOWABLE
+    schemes (a rejected one is described, never quoted — urlsplit's scheme
+    grammar is unbounded and can carry a token), a host matching the
+    hostname (or IPv6-literal) grammar, and a numeric port. The path, query, fragment and userinfo are never shown — not
     redacted char by char, simply not printed — and a Location that is not
     a followable http(s) URL with a valid authority contributes NO
     content at all, only its shape.
@@ -320,8 +321,13 @@ def _safe_location(location: str | None) -> str:
             # only content is attacker-chosen text, so none is printed.
             return "a redirect with no host (target withheld)"
         if scheme and scheme not in _FOLLOWABLE_SCHEMES:
-            return f"a {scheme}: redirect this client cannot follow (target withheld)"
-        authority = f"{host}:{port}" if port else host
+            # The scheme is NOT echoed. urlsplit's grammar
+            # ([a-zA-Z][a-zA-Z0-9+.-]*, unbounded) is wide enough to carry a
+            # hex token or a UUID, so printing a rejected one would reopen
+            # exactly the class this contract closed — in the branch added
+            # to close it.
+            return "a redirect to a scheme this client cannot follow (target withheld)"
+        authority = f"{host}:{port}" if port is not None else host
         # No scheme = scheme-relative ("//host/path"), which inherits the
         # request's own — a valid and followable form.
         shown = f"{scheme}://{authority}" if scheme else f"//{authority}"
