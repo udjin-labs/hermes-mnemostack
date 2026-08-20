@@ -94,10 +94,9 @@ def _is_pure_echo(content: str, mask: bytearray) -> bool:
     words = [i for i, ch in enumerate(content) if ch.isalnum()]
     if not words:
         # No words at all: an echo only if literally everything non-space
-        # was recalled (a stored "👍" re-sent verbatim).
-        return all(
-            mask[i] for i, ch in enumerate(content) if not ch.isspace()
-        ) and any(not ch.isspace() for ch in content)
+        # was recalled (a stored "👍" re-sent verbatim). Callers strip and
+        # skip empty turns, so there is always something non-space here.
+        return all(mask[i] for i, ch in enumerate(content) if not ch.isspace())
     return all(mask[i] for i in words)
 
 
@@ -569,7 +568,6 @@ class MnemostackProvider(MemoryProvider):
         # so they are evaluated against the post-mask residual.
         if short_spans:
             probe = bytearray(mask)
-            matched_short = False
             for text in short_spans:
                 if not text:
                     continue
@@ -580,9 +578,11 @@ class MnemostackProvider(MemoryProvider):
                         break
                     for j in range(i, i + len(text)):
                         probe[j] = 1
-                    matched_short = True
                     start_at = i + len(text)
-            if (removed or matched_short) and _is_pure_echo(content, probe):
+            # Coverage alone decides: with nothing masked, a non-empty
+            # turn can never be fully covered, so no "did anything match"
+            # gate is needed here.
+            if _is_pure_echo(content, probe):
                 return ""
 
         if not removed:
