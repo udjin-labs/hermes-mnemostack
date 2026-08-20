@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from hermes_mnemostack.client import LocalClient, MemoryItem
 # `conftest`, not `tests.conftest`: tests/ is not a package, so on a
 # clean checkout (CI) there is no `tests` module to import from —
 # pytest puts the test directory itself on sys.path.
 from conftest import FakeEmbedding, make_mem_store
+
+from hermes_mnemostack.client import LocalClient, MemoryItem
 
 
 @pytest.fixture()
