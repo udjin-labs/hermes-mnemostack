@@ -297,8 +297,9 @@ def test_concurrent_session_prefetch_joins_own_thread(provider):
     p.queue_prefetch("session-a slow question", session_id="A")
     p.queue_prefetch("session-b fast question", session_id="B")
     with p._lock:
-        b_thread = p._prefetch_threads["B"]
-    b_thread.join(timeout=3.0)  # B done; A still blocked
+        b_thread = p._prefetch_threads.get("B")
+    if b_thread is not None:
+        b_thread.join(timeout=3.0)  # B done; A still blocked
     a_release.set()  # A releases; its prefetch() below must join A's thread
     assert "A block" in p.prefetch("session-a slow question", session_id="A")
     assert "B block" in p.prefetch("session-b fast question", session_id="B")
@@ -430,3 +431,53 @@ def test_5xx_skips_per_item_retry(provider):
     p.sync_turn("u", "a")
     _wait_threads(p)
     assert calls == [2]
+
+
+def test_unconsumed_block_survives_session_churn(provider):
+    """R4 (agent P1): recall usually finishes BEFORE the host consumes it —
+    a completed-but-undelivered block must survive filler churn just like
+    an in-flight thread."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="v", text="victim cached block", score=0.9)]
+    p._MAX_SESSION_STATES = 2
+    p.queue_prefetch("victim question", session_id="victim")
+    _wait_threads(p)  # completed, cached, NOT consumed
+    fake.hits = []
+    for i in range(5):
+        p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
+    _wait_threads(p)
+    assert "victim cached block" in p.prefetch("victim question", session_id="victim")
+
+
+def test_completed_workers_self_clean_thread_entries(provider):
+    """R4 (codex P2): a drained burst must shrink back — completed workers
+    drop their own thread references and re-prune."""
+    p, fake = provider
+    p.queue_prefetch("some question", session_id="solo")
+    _wait_threads(p)
+    with p._lock:
+        assert "solo" not in p._prefetch_threads  # self-cleaned on completion
+
+
+def test_fresh_queue_survives_all_protected_prune(provider):
+    """R4 (codex P2): with every slot protected, the freshly queued key must
+    not become its own victim (thread not registered yet at prune time)."""
+    import threading as _threading
+
+    p, fake = provider
+    release = _threading.Event()
+
+    class _Slow:
+        def recall(self, query, *, limit=5, filters=None):
+            release.wait(timeout=5.0)
+            return [RecallHit(id="x", text=f"answer to {query}", score=0.9)]
+
+        def close(self):
+            pass
+
+    p._client = _Slow()
+    p._MAX_SESSION_STATES = 1
+    p.queue_prefetch("first question", session_id="one")   # live, protected
+    p.queue_prefetch("second question", session_id="two")  # must survive queueing
+    release.set()
+    assert "second question" in p.prefetch("second question", session_id="two")

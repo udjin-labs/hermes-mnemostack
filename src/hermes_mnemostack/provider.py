@@ -171,7 +171,10 @@ class MnemostackProvider(MemoryProvider):
             gen = self._prefetch_gen_counter
             self._prefetch_gen.pop(key, None)
             self._prefetch_gen[key] = gen
-            self._prune_session_dicts_locked()
+            # protect=key: the freshly queued session's thread is not
+            # registered yet — without protection an all-live prune would
+            # evict this very generation and orphan the recall it started.
+            self._prune_session_dicts_locked(protect=key)
 
         def _run() -> None:
             try:
@@ -181,9 +184,19 @@ class MnemostackProvider(MemoryProvider):
                 hits = []
             block = self._format_hits(hits)
             with self._lock:
-                if self._prefetch_gen.get(key) == gen:
+                # Empty results are not cached: there is nothing to inject,
+                # and an empty entry would pointlessly PROTECT the session
+                # from LRU eviction, starving real victims.
+                if self._prefetch_gen.get(key) == gen and block:
                     self._prefetched.pop(key, None)
                     self._prefetched[key] = (block, len(hits))
+                # Completed worker cleans up after itself: drop the dead
+                # thread reference and re-prune, so a burst past the bound
+                # shrinks back once it drains instead of lingering until
+                # some later unrelated call happens to prune.
+                if self._prefetch_threads.get(key) is threading.current_thread():
+                    del self._prefetch_threads[key]
+                self._prune_session_dicts_locked()
 
         t = threading.Thread(target=_run, daemon=True, name="mnemostack-prefetch")
         with self._lock:
@@ -251,7 +264,7 @@ class MnemostackProvider(MemoryProvider):
             # the LRU-eviction victim just because it was created first.
             turn = self._turn_index.pop(sid, 0)
             self._turn_index[sid] = turn + 1
-            self._prune_session_dicts_locked()
+            self._prune_session_dicts_locked(protect=sid)
         items = []
         for role, content in (("user", user_content), ("assistant", assistant_content)):
             content = (content or "").strip()
@@ -356,17 +369,27 @@ class MnemostackProvider(MemoryProvider):
 
     _MAX_SESSION_STATES = 64
 
-    def _prune_session_dicts_locked(self) -> None:
+    def _prune_session_dicts_locked(self, protect: str | None = None) -> None:
         """Bound the per-session dicts on long-running multi-session hosts.
 
-        Recency-ordered (touch sites pop-then-assign), and a session with
-        a LIVE prefetch thread is never the victim — evicting it would
-        drop its own in-flight recall on the floor under session churn.
-        Caller holds the lock."""
+        Recency-ordered (touch sites pop-then-assign). A session is never
+        the victim while its work is undelivered: a LIVE prefetch thread
+        OR a completed-but-unconsumed recall block — evicting either
+        drops a session's own recall on the floor under filler churn (the
+        unconsumed-block window is the COMMON one: recall usually
+        finishes well before the host consumes it). ``protect`` shields
+        the key the caller is mid-operation on (its thread may not be
+        registered yet). Protection is not unbounded: past 2x the cap the
+        oldest entry goes regardless, loudly — abandoned sessions must
+        not accumulate forever on a server host. Caller holds the lock."""
 
-        def _alive(key: str) -> bool:
+        def _protected(key: str) -> bool:
+            if key == protect:
+                return True
             t = self._prefetch_threads.get(key)
-            return t is not None and t.is_alive()
+            if t is not None and t.is_alive():
+                return True
+            return key in self._prefetched  # ready, not yet delivered
 
         for d in (
             self._turn_index,
@@ -375,9 +398,28 @@ class MnemostackProvider(MemoryProvider):
             self._prefetch_threads,
         ):
             while len(d) > self._MAX_SESSION_STATES:
-                victim = next((k for k in d if not _alive(k)), None)
+                victim = next((k for k in d if not _protected(k)), None)
                 if victim is None:
-                    break  # everything in flight — hold the line
+                    if len(d) > 2 * self._MAX_SESSION_STATES:
+                        # Hard cap may override BLOCK protection (oldest
+                        # undelivered block goes) but never a live thread
+                        # (its join bookkeeping must stay intact) nor the
+                        # in-progress key.
+                        def _hard_evictable(k: str) -> bool:
+                            if k == protect:
+                                return False
+                            t = self._prefetch_threads.get(k)
+                            return not (t is not None and t.is_alive())
+
+                        victim = next((k for k in d if _hard_evictable(k)), None)
+                        if victim is None:
+                            break
+                        logger.warning(
+                            "mnemostack session-state hard cap: evicting "
+                            "session state for %r", victim
+                        )
+                    else:
+                        break  # protected set within tolerance — hold
                 d.pop(victim)
 
     def shutdown(self) -> None:
