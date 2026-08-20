@@ -1283,3 +1283,17 @@ def test_tool_provenance_follows_the_calling_session(provider):
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert any("ops wiki" in t for t in stored)
+
+
+def test_tool_descriptions_promise_no_specific_retrieval_arms(provider):
+    """Final review (agent P1): the search tool's description is a
+    contract the MODEL plans against — local mode is vector-only and
+    remote depends on deployment config, so it must not promise lexical,
+    temporal or graph recall."""
+    p, _fake = provider
+    search = next(
+        t for t in p.get_tool_schemas() if t["name"] == "mnemostack_search"
+    )
+    text = f"{search['description']} {p.system_prompt_block()}".lower()
+    for promise in ("lexical", "temporal", "graph", "bm25", "hybrid"):
+        assert promise not in text, promise

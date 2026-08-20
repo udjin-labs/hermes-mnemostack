@@ -2,9 +2,10 @@
 
 Lifecycle wiring over the transport-agnostic client boundary
 (:mod:`hermes_mnemostack.client`): background prefetch feeding the next
-turn's context injection, verbatim turn capture, deterministic recall
-indicator, session-switch bookkeeping. Tools and the fenced system-prompt
-block arrive in a later task — this layer is recall+capture only.
+turn's context injection, verbatim turn capture with provenance-based
+self-capture suppression, the deterministic recall indicator,
+session-switch bookkeeping, the system-prompt block, and the three tools
+the model can call (search, remember, forget).
 """
 
 from __future__ import annotations
@@ -306,10 +307,15 @@ class MnemostackProvider(MemoryProvider):
             {
                 "name": "mnemostack_search",
                 "description": (
-                    "Search persistent memory (hybrid semantic + lexical + "
-                    "temporal recall). Use when the answer may depend on "
-                    "prior sessions, decisions, preferences, or identifiers "
-                    "not in the current context."
+                    # Deliberately does not enumerate retrieval arms: which
+                    # of them exist is a deployment decision (local mode is
+                    # vector-only), and promising the model temporal or
+                    # lexical recall it may not have would steer how it
+                    # phrases queries.
+                    "Search persistent memory from previous sessions. Use "
+                    "when the answer may depend on prior sessions, "
+                    "decisions, preferences, or identifiers not in the "
+                    "current context."
                 ),
                 "parameters": {
                     "type": "object",
