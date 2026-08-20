@@ -255,30 +255,42 @@ def _probe_remote(report: Report, cfg: dict[str, Any], http: Any | None = None) 
         client.close()
 
 
-#: A hostname, positively: letters, digits, dots and hyphens. Anything
-#: else in the host position is not a hostname — it is something else
-#: wearing one, and it is not printed.
-_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9.\-]+$")
-#: An IPv6 literal, positively: hex digits, colons, and the dots of an
-#: embedded IPv4 tail.
-_IPV6_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
+#: A hostname, positively: letters, digits, dots, hyphens and underscores.
+#: Underscores are not RFC 1123, but internal DNS (compose/kubernetes
+#: service names) uses them and an operator's redirect really can point at
+#: one — dropping those would make a legitimate target read like an attack.
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+#: An IPv6 literal, positively: hex digits, colons, the dots of an embedded
+#: IPv4 tail, and an optional zone id.
+_IPV6_RE = re.compile(r"^[0-9A-Fa-f:.]+(?:%(?:25)?[A-Za-z0-9._-]+)?$")
+#: The only schemes this client can follow. Anything else is not a
+#: destination we could reach even if we wanted to.
+_FOLLOWABLE_SCHEMES = ("http", "https")
 
 
 def _safe_location(location: str | None) -> str:
-    """Where a redirect points, printed from validated parts only.
+    """Where a redirect points, named ONLY by its validated authority.
 
-    An SSO/proxy redirect routinely carries a secret — a token in the
-    query string, credentials in the userinfo, a legacy ";jsessionid="
-    parameter — and these reports get pasted into support threads.
+    Three rounds of review found a secret in three different positions of
+    this string — the query, then a path parameter, then the host — and
+    the fourth found that a Location with no `//` authority makes urlsplit
+    hand the ENTIRE remainder over as the "path", which sailed past every
+    check. "Places a secret can sit in a URL" is not a bounded list, so
+    this stops enumerating them.
 
-    The contract is deliberately CONSTRUCTIVE rather than a list of
-    places to strip: every earlier attempt at the latter left a position
-    uncovered (the path, then the host), because "where a secret can sit
-    in a URL" is not a bounded list. So nothing here is passed through:
-    the answer is rebuilt from a scheme, a host that matches the hostname
-    grammar, a numeric port, and path segments cut at their first ';'.
-    Whatever did not survive validation is named in the suffix, so the
-    reader knows what was withheld rather than guessing.
+    The contract: the report names the DESTINATION AUTHORITY and nothing
+    else. Printed output can only ever be one of the two literal schemes,
+    a host matching the hostname (or IPv6-literal) grammar, and a numeric
+    port. The path, query, fragment and userinfo are never shown — not
+    redacted char by char, simply not printed — and a Location that is not
+    a followable http(s) URL with a valid authority contributes NO
+    content at all, only its shape.
+
+    What that trades away: an operator no longer sees the redirect's path.
+    It buys a property worth more to a diagnostic whose output gets pasted
+    into support threads — no attacker-chosen substring can reach the
+    report — and the host is what actually answers "where did my base_url
+    send me". Curl the endpoint for the rest.
     """
     if not location:
         return "unknown"
@@ -286,56 +298,36 @@ def _safe_location(location: str | None) -> str:
         from urllib.parse import urlsplit
 
         parts = urlsplit(location)
-        removed: list[str] = []
-        # Path parameters (";jsessionid=…") are the cookie-less way to carry
-        # a session token, and they live in the path.
-        path = "/".join(seg.split(";", 1)[0] for seg in parts.path.split("/"))
-        if path != parts.path:
-            removed.append("path parameters")
+        scheme = parts.scheme.lower()
         try:
             port = parts.port
         except ValueError:
-            # urlsplit only validates the port when it is READ, and a
+            # urlsplit only validates the port when it is READ; a
             # non-numeric one means the authority is not what it claims.
-            port, host = None, ""
-            removed.append("host")
-        else:
-            host = parts.hostname or ""
-            if host and not (
-                _HOSTNAME_RE.match(host)
-                or (":" in host and _IPV6_RE.match(host))
-            ):
-                # e.g. "evil.com;jsessionid=SECRET" — urlsplit hands the
-                # whole thing over as the "host", and printing it verbatim
-                # would leak exactly what this function exists to remove.
-                host = ""
-                removed.append("host")
+            return "a malformed redirect target (withheld)"
+        host = parts.hostname or ""
         if host and ":" in host:
-            # urlsplit strips an IPv6 literal's brackets; without them back
-            # the host runs into the port and the destination we print is
-            # ambiguous rather than merely redacted.
-            host = f"[{host}]"
-        if host and port:
-            host = f"{host}:{port}"
-        if parts.username or parts.password:
-            removed.append("credentials")
-        if parts.query:
-            removed.append("query")
-        if parts.fragment:
-            removed.append("fragment")
+            if not _IPV6_RE.match(host):
+                return "a malformed redirect target (withheld)"
+            host = f"[{host}]"  # urlsplit strips an IPv6 literal's brackets
+        elif host and not _HOSTNAME_RE.match(host):
+            # e.g. "evil.com;jsessionid=SECRET" — urlsplit hands the whole
+            # thing over as the "host".
+            return "a malformed redirect target (withheld)"
         if not host:
-            shown = path or "(redacted)"
-        elif parts.scheme:
-            shown = f"{parts.scheme}://{host}{path}"
-        else:
-            # A scheme-relative Location ("//host/path") is valid; emitting
-            # "://host/path" for it would be a URL nobody can follow.
-            shown = f"//{host}{path}"
-        if removed:
-            shown += f" ({', '.join(removed)} redacted)"
-        return shown or "unknown"
+            # A relative Location ("/login"), or an opaque one with no
+            # authority at all ("data:…", a backslash-mangled target). Its
+            # only content is attacker-chosen text, so none is printed.
+            return "a redirect with no host (target withheld)"
+        if scheme and scheme not in _FOLLOWABLE_SCHEMES:
+            return f"a {scheme}: redirect this client cannot follow (target withheld)"
+        authority = f"{host}:{port}" if port else host
+        # No scheme = scheme-relative ("//host/path"), which inherits the
+        # request's own — a valid and followable form.
+        shown = f"{scheme}://{authority}" if scheme else f"//{authority}"
+        return f"{shown} (path and query not shown)"
     except Exception:  # noqa: BLE001 — a malformed Location must not leak or crash
-        return "unparseable (redacted)"
+        return "unparseable (withheld)"
 
 
 def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:

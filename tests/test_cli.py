@@ -460,28 +460,9 @@ def test_a_redirect_location_is_printed_without_its_secrets(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "SECRET-abc123" not in out
     assert "user:pw" not in out and "#frag" not in out
-    assert "sso.invalid/authorize" in out  # the useful half survives
-    # The suffix names what went missing rather than a fixed phrase.
-    assert "credentials, query, fragment redacted" in out
-
-
-def test_redacted_locations_stay_valid_urls():
-    """R3 (codex P2): redaction must not corrupt the destination. A
-    scheme-relative Location is valid and must not become '://host/path';
-    an IPv6 literal loses its brackets to urlsplit and must get them back,
-    or host and port run together into an ambiguous address."""
-    assert (
-        cli._safe_location("//sso.invalid/login?token=x")
-        == "//sso.invalid/login (query redacted)"
-    )
-    assert (
-        cli._safe_location("https://[2001:db8::1]:8443/authorize?t=x")
-        == "https://[2001:db8::1]:8443/authorize (query redacted)"
-    )
-    assert cli._safe_location("https://plain.invalid/x") == "https://plain.invalid/x"
-    assert cli._safe_location("/relative/path") == "/relative/path"
-    assert cli._safe_location(None) == "unknown"
-    assert cli._safe_location("") == "unknown"
+    assert "sso.invalid" in out  # the authority — the useful half — survives
+    assert "authorize" not in out  # the path is not printed at all
+    assert "path and query not shown" in out
 
 
 def test_doctor_reports_a_null_field_instead_of_crashing(tmp_path, capsys):
@@ -542,52 +523,60 @@ def test_hermes_home_override_restores_an_outer_scope(tmp_path):
         hermes_constants.reset_hermes_home_override(outer)
 
 
-def test_path_parameters_are_redacted_too():
-    """R4 (review agent P3): ';jsessionid=' is the legacy cookie-less way to
-    carry a session token, and it lives in the PATH — which this function
-    otherwise prints verbatim."""
-    assert cli._safe_location("https://sso.invalid/health;jsessionid=SECRET123") == (
-        "https://sso.invalid/health (path parameters redacted)"
-    )
-    assert "SECRET" not in cli._safe_location(
-        "https://sso.invalid/a;s=SECRET/b;t=SECRET2?q=SECRET3"
-    )
-    # An ordinary path is still printed in full.
-    assert cli._safe_location("https://sso.invalid/a/b/c") == "https://sso.invalid/a/b/c"
-
-
-def test_a_secret_in_the_host_position_is_not_printed():
-    """R5 (review agent P1): the round-4 fix cut ';' out of the PATH only,
-    and urlsplit hands "evil.com;jsessionid=SECRET" over as the host — so
-    the same class of secret, one position earlier, printed verbatim with
-    no marker at all. The function is constructive now: a host that is not
-    a hostname is not printed, and the suffix names what was withheld."""
-    for loc in (
-        "https://evil.com;jsessionid=SECRET-ABC/health",
-        "https://user:pw@evil.com;jsessionid=SECRET-ABC/health",
-        "https://evil.com:8080;jsessionid=SECRET-ABC/health",
-    ):
+def test_the_report_names_the_authority_and_nothing_else():
+    """R6 (review agent P1): four rounds found a secret in four positions
+    (query, path parameter, host, and — for a Location with no `//` — the
+    whole string arriving as the "path"). The contract stopped enumerating
+    positions: the report names the destination AUTHORITY, so the only
+    text that can ever be printed is one of two schemes, a validated host,
+    and a numeric port."""
+    leaky = [
+        "data:text/plain,SECRETPAYLOAD",
+        "javascript:alert(document.cookie)//SECRET",
+        "javascript://evil.invalid/SECRET",
+        "https:\\\\evil.invalid\\\\SECRET",
+        "https://evil.invalid;jsessionid=SECRET/health",
+        "https://user:pw@sso.invalid/authorize?access_token=SECRET#SECRET",
+        "https://sso.invalid/health;jsessionid=SECRET",
+        "/relative/SECRET",
+        "file:///etc/SECRET",
+    ]
+    for loc in leaky:
         shown = cli._safe_location(loc)
         assert "SECRET" not in shown.upper(), (loc, shown)
-        assert "host" in shown  # and the reader is told the host went missing
-    # Ordinary hosts, ports and IPv6 literals still survive intact.
-    assert cli._safe_location("https://ok.invalid:8443/x") == "https://ok.invalid:8443/x"
-    assert (
-        cli._safe_location("https://[2001:db8::1]/x") == "https://[2001:db8::1]/x"
-    )
+        assert "pw" not in shown, (loc, shown)
 
 
-def test_the_redaction_marker_names_what_it_removed():
-    """R5 (review agent P3): the marker always read "query/credentials
-    redacted", which overstated a run that had only cut a path parameter —
-    an operator diffing the printed string against the raw header could
-    not tell what had actually been withheld."""
-    assert cli._safe_location("https://a.invalid/p;s=1") == (
-        "https://a.invalid/p (path parameters redacted)"
+def test_a_followable_target_still_names_its_host():
+    """The trade is the path, not the answer: an operator still learns
+    WHERE base_url sent them, which is the question they asked."""
+    assert cli._safe_location("https://sso.invalid/authorize?t=x") == (
+        "https://sso.invalid (path and query not shown)"
     )
-    assert cli._safe_location("https://a.invalid/p?q=1") == (
-        "https://a.invalid/p (query redacted)"
+    assert cli._safe_location("https://ok.invalid:8443/x") == (
+        "https://ok.invalid:8443 (path and query not shown)"
     )
-    assert cli._safe_location("https://u:p@a.invalid/p#f") == (
-        "https://a.invalid/p (credentials, fragment redacted)"
+    # Scheme-relative is a valid, followable form; it inherits our scheme.
+    assert cli._safe_location("//sso.invalid/login?token=x") == (
+        "//sso.invalid (path and query not shown)"
     )
+    # IPv6 keeps its brackets, and a zone id survives.
+    assert cli._safe_location("https://[2001:db8::1]:8443/x") == (
+        "https://[2001:db8::1]:8443 (path and query not shown)"
+    )
+    assert "fe80::1" in cli._safe_location("http://[fe80::1%25eth0]/x")
+    # Internal DNS names with an underscore are legitimate targets, not
+    # attacks — dropping them would make a real host read like one.
+    assert cli._safe_location("https://internal_service.corp.example/x") == (
+        "https://internal_service.corp.example (path and query not shown)"
+    )
+    assert cli._safe_location(None) == "unknown"
+
+
+def test_an_unfollowable_target_is_reported_by_shape():
+    """Withheld, but not silently: the operator is told a redirect
+    happened and why its target is not printed."""
+    assert "cannot follow" in cli._safe_location("javascript://evil.invalid/x")
+    assert "no host" in cli._safe_location("/relative/path")
+    assert "malformed" in cli._safe_location("https://evil.invalid;x=1/health")
+    assert "malformed" in cli._safe_location("https://evil.invalid:99999/x")
