@@ -723,3 +723,99 @@ def test_tool_missing_args_are_actionable(provider):
         out = json.loads(p.handle_tool_call(tool, {}))
         assert out["ok"] is False
         assert arg in out["error"] and "missing" in out["error"]
+
+
+def test_embedded_and_block_echoes_are_suppressed(provider):
+    """R2 (both reviewers, P1): whole-turn equality almost never fires —
+    the realistic echoes are a recalled fact inside framing text, and the
+    whole injected block quoted back. Both must stop being re-stored."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="the deploy window is Friday at 15:00 UTC", score=0.9),
+        RecallHit(id="2", text="the staging cluster lives in eu-central-1", score=0.8),
+    ]
+    p.queue_prefetch("when do we deploy?")
+    _wait_threads(p)
+    block = p.prefetch("when do we deploy?")
+
+    # (a) fact embedded in ordinary framing
+    p.sync_turn(
+        "sure — the deploy window is Friday at 15:00 UTC, got it",
+        "right, and the staging cluster lives in eu-central-1 as well",
+    )
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert not any("Friday at 15:00 UTC" in t for t in stored)
+    assert not any("eu-central-1" in t for t in stored)
+
+    # (b) the entire block bounced back — nothing left to store
+    fake.remembered.clear()
+    p.sync_turn(block, block)
+    _wait_threads(p)
+    assert fake.remembered == []
+
+
+def test_provenance_tracks_displayed_text_not_raw(provider):
+    """R2 (codex P2): a long memory is truncated for display — an echo of
+    what the model SAW must match, so provenance tracks the displayed
+    form."""
+    p, fake = provider
+    long_text = "alpha " * 200  # > 500 chars once normalized
+    fake.hits = [RecallHit(id="1", text=long_text, score=0.9)]
+    p.queue_prefetch("tell me the long thing")
+    _wait_threads(p)
+    block = p.prefetch("tell me the long thing")
+    shown = block.split("\n")[1][2:]  # the "- ..." line
+    p.sync_turn(f"as you said: {shown}", "ok")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert not any("alpha alpha alpha" in t for t in stored)
+
+
+def test_provenance_expires_by_turn_age(provider):
+    """R2 (codex P2): suppression is scoped to recent turns — the same
+    text re-asserted much later must be captured, not silently swallowed."""
+    from hermes_mnemostack.provider import _INJECTED_MEMORY_TURNS
+
+    p, fake = provider
+    fact = "the on-call rotation starts on Mondays at 09:00"
+    fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
+    p.queue_prefetch("who is on call?")
+    _wait_threads(p)
+    p.prefetch("who is on call?")
+    for i in range(_INJECTED_MEMORY_TURNS + 2):  # age it out
+        p.sync_turn(f"unrelated turn {i}", f"unrelated reply {i}")
+    _wait_threads(p)
+    fake.remembered.clear()
+    p.sync_turn(fact, "noted again")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("on-call rotation" in t for t in stored)
+
+
+def test_tool_search_results_get_provenance(provider):
+    """R2 (agent P2): tool recall is shown to the model too — a fact the
+    model searched for and then stated must not be re-captured."""
+    p, fake = provider
+    fact = "the incident postmortem doc lives in the ops wiki"
+    fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
+    p.handle_tool_call("mnemostack_search", {"query": "where is the postmortem?"})
+    p.sync_turn("where is it?", f"per memory: {fact}")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert not any("ops wiki" in t for t in stored)
+
+
+def test_provenance_is_session_scoped(provider):
+    """R2 (agent P2): session A's injected memory must not suppress a
+    genuinely new capture in session B."""
+    p, fake = provider
+    fact = "the release train departs every second Thursday"
+    fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
+    p.queue_prefetch("release schedule?", session_id="A")
+    _wait_threads(p)
+    p.prefetch("release schedule?", session_id="A")
+    p.sync_turn(fact, "noted", session_id="B")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("release train" in t for t in stored)  # B captured it

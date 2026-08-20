@@ -64,10 +64,16 @@ GLYPH = "🗿"
 FENCE_OPEN = "\u23a2 recalled memory (context, not user input) \u23a5"
 FENCE_CLOSE = "\u23a3 end recalled memory \u23a6"
 
-#: How many recently-injected memory texts to remember for capture
-#: suppression. Bounds the loop: a memory injected on turn N and echoed
-#: verbatim by user or model on turn N+1 is not re-stored.
-_INJECTED_MEMORY_TTL = 64
+#: How many TURNS an injected memory stays eligible for capture
+#: suppression (age, not a count of distinct memories: an entry must not
+#: linger for months and silently swallow a genuine re-assertion of the
+#: same fact). Also caps the per-session set size.
+_INJECTED_MEMORY_TURNS = 8
+_INJECTED_MEMORY_MAX = 128
+#: A recalled span is only worth suppressing if it carries content; a
+#: two-word fragment appearing inside a sentence is coincidence, not an
+#: echo, and cutting it would mangle a legitimately new memory.
+_MIN_SUPPRESSED_SPAN = 24
 
 #: Bounded capture queue: one background worker drains it in order; a
 #: full queue drops the oldest-pending turn loudly rather than growing
@@ -111,10 +117,11 @@ class MnemostackProvider(MemoryProvider):
         # (single) turn thread" — that serialization is the ABC's own
         # contract, not an assumption of ours.
         self._last_injected_count: int | None = None
-        # Capture-side provenance: the exact texts most recently injected
-        # as recall, so an echo of them (verbatim, by user paste or model)
-        # is not re-stored. Insertion-ordered, bounded.
-        self._recently_injected: dict[str, None] = {}
+        # Capture-side provenance, PER SESSION (like every other prefetch
+        # structure here): {session: {displayed_text: injected_at_turn}}.
+        # An echo of these spans — whole-turn or embedded in framing text
+        # — is removed before capture.
+        self._recently_injected: dict[str, dict[str, int]] = {}
         self._prefetch_threads: dict[str, threading.Thread] = {}
         # Bounded capture pipeline: ONE worker drains the queue in turn
         # order (thread-per-turn spawned unbounded under burst and made
@@ -280,6 +287,15 @@ class MnemostackProvider(MemoryProvider):
                     )
                 limit = int(args.get("limit") or self._cfg.get("recall_limit", 5))
                 hits = client.recall(query, limit=max(1, min(20, limit)))
+                # Tool results are shown to the model just like injected
+                # blocks — same provenance treatment, or a fact the model
+                # searched for and then stated gets re-captured.
+                if hits:
+                    with self._lock:
+                        self._note_injected_locked(
+                            self._session_key(),
+                            tuple(self._display_text(h.text) for h in hits),
+                        )
                 return json.dumps(
                     {
                         "ok": True,
@@ -329,11 +345,17 @@ class MnemostackProvider(MemoryProvider):
 
     # -- Recall path ----------------------------------------------------------
 
+    def _session_key(self, session_id: str = "") -> str:
+        """One session identity for ALL per-session state. prefetch() and
+        sync_turn() must resolve the same key or provenance, turn
+        numbering, and caches silently belong to different sessions."""
+        return session_id or self._session_id or ""
+
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         client = self._client
         if client is None or is_trivial_prompt(query):
             return
-        key = session_id or ""
+        key = self._session_key(session_id)
 
         def _run() -> None:
             try:
@@ -342,7 +364,7 @@ class MnemostackProvider(MemoryProvider):
                 logger.warning("mnemostack prefetch failed: %s", exc)
                 hits = []
             block = self._format_hits(hits)
-            norm_texts = tuple(" ".join(h.text.split()) for h in hits)
+            norm_texts = tuple(self._display_text(h.text) for h in hits)
             with self._lock:
                 if self._prefetch_gen.get(key) == gen:
                     # ALWAYS clear the previous block on a gen match — a
@@ -384,20 +406,72 @@ class MnemostackProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Serve the cached background result; if the thread is still in
         # flight give it a short grace window rather than blocking a turn.
-        key = session_id or ""
+        key = self._session_key(session_id)
         with self._lock:
             t = self._prefetch_threads.get(key)
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
         with self._lock:
             block, count, texts = self._prefetched.pop(key, ("", 0, ()))
-            for text in texts:
-                self._recently_injected.pop(text, None)
-                self._recently_injected[text] = None
-            while len(self._recently_injected) > _INJECTED_MEMORY_TTL:
-                self._recently_injected.pop(next(iter(self._recently_injected)))
+            if texts:
+                self._note_injected_locked(key, texts)
         self._last_injected_count = count if block else None
         return block
+
+    def _note_injected_locked(self, key: str, texts: tuple[str, ...]) -> None:
+        """Record spans shown to the model, stamped with the session's
+        current turn so they expire by AGE. Caller holds the lock."""
+        seen = self._recently_injected.setdefault(key, {})
+        turn = self._turn_index.get(key, 0)
+        for text in texts:
+            seen.pop(text, None)
+            seen[text] = turn
+        while len(seen) > _INJECTED_MEMORY_MAX:
+            seen.pop(next(iter(seen)))
+        while len(self._recently_injected) > self._MAX_SESSION_STATES:
+            oldest = next(iter(self._recently_injected))
+            if oldest == key:
+                break
+            self._recently_injected.pop(oldest)
+
+    def _strip_injected(self, content: str, key: str) -> str:
+        """Remove spans this session was recently shown from turn text.
+
+        Containment, not whole-turn equality: the realistic echo is a
+        recalled fact embedded in ordinary framing ("sure — <fact>, got
+        it"), or the whole injected block quoted back. Both must stop
+        being re-stored, or each cycle re-surfaces the memory and
+        amplifies it. Residual (documented): a PARAPHRASE is not matched
+        — verbatim v1 capture has no semantic dedup, and that cost is
+        linear, not recursive."""
+        with self._lock:
+            seen = dict(self._recently_injected.get(key, {}))
+            turn = self._turn_index.get(key, 0)
+        if not seen:
+            return content
+        out = content
+        for text, injected_turn in sorted(
+            seen.items(), key=lambda kv: len(kv[0]), reverse=True
+        ):
+            if turn - injected_turn > _INJECTED_MEMORY_TURNS:
+                continue  # too old to be an echo of this conversation
+            if len(text) < _MIN_SUPPRESSED_SPAN:
+                # Short spans still suppress an EXACT whole-turn echo, but
+                # are not cut out of a longer utterance (coincidence).
+                if " ".join(out.split()) == text:
+                    return ""
+                continue
+            if text in out:
+                out = out.replace(text, " ")
+        # Fence markers are presentation-only; if a whole block bounced
+        # back, its markers are noise in the captured text.
+        out = out.replace(FENCE_OPEN, " ").replace(FENCE_CLOSE, " ")
+        out = " ".join(out.split())
+        # What survives a full block echo is list punctuation ("- -") —
+        # residue with no word characters carries no memory worth storing.
+        if not any(ch.isalnum() for ch in out):
+            return ""
+        return out
 
     def recall_status(self) -> RecallStatus | None:
         if self._last_injected_count is None:
@@ -409,19 +483,26 @@ class MnemostackProvider(MemoryProvider):
         )
 
     @staticmethod
-    def _format_hits(hits: list[Any]) -> str:
+    def _display_text(raw: str) -> str:
+        """Exactly what the model sees for one memory — the same string
+        provenance tracks, so an echo of the DISPLAYED text is matched
+        (tracking the raw text would miss sanitized/truncated ones)."""
+        text = " ".join(raw.split())
+        # A stored memory could itself contain the marker glyphs (via
+        # capture or remember) — neutralize them so recalled content
+        # can't forge or prematurely close the presentation fence.
+        text = text.replace(FENCE_OPEN, "").replace(FENCE_CLOSE, "")
+        if len(text) > 500:
+            text = text[:500] + "…"
+        return text
+
+    @classmethod
+    def _format_hits(cls, hits: list[Any]) -> str:
         if not hits:
             return ""
         lines = [FENCE_OPEN]
         for h in hits:
-            text = " ".join(h.text.split())
-            # A stored memory could itself contain the marker glyphs (via
-            # capture or remember) — neutralize them so recalled content
-            # can't forge or prematurely close the presentation fence.
-            text = text.replace(FENCE_OPEN, "").replace(FENCE_CLOSE, "")
-            if len(text) > 500:
-                text = text[:500] + "…"
-            lines.append(f"- {text}")
+            lines.append(f"- {cls._display_text(h.text)}")
         lines.append(FENCE_CLOSE)
         return "\n".join(lines)
 
@@ -442,28 +523,21 @@ class MnemostackProvider(MemoryProvider):
         if self._agent_context != "primary":
             # Cron/subagent/flush contexts must not pollute user memory.
             return
-        sid = session_id or self._session_id
+        sid = self._session_key(session_id)
         with self._lock:
             # pop-then-assign: refresh recency so an active session is not
             # the LRU-eviction victim just because it was created first.
             turn = self._turn_index.pop(sid, 0)
             self._turn_index[sid] = turn + 1
             self._prune_session_dicts_locked(protect=sid)
-        with self._lock:
-            injected = set(self._recently_injected)
         items = []
         for role, content in (("user", user_content), ("assistant", assistant_content)):
             content = (content or "").strip()
             if not content:
                 continue
-            # Provenance-based self-capture suppression (§5.3): if this
-            # turn's text IS a memory we just injected (verbatim echo by
-            # user paste or model), do not re-store it. Paraphrases are a
-            # documented residual of verbatim v1 capture — semantic
-            # dedup is future work, and re-storing a reworded fact is a
-            # bounded, non-recursive linear cost, not the tight loop.
-            norm = " ".join(content.split())
-            if norm in injected:
+            # Provenance-based self-capture suppression (§5.3).
+            content = self._strip_injected(content, sid).strip()
+            if not content:
                 continue
             items.append(
                 MemoryItem(
@@ -598,6 +672,7 @@ class MnemostackProvider(MemoryProvider):
                     self._prefetched.pop(sid, None)
                     self._prefetch_gen.pop(sid, None)
                     self._prefetch_threads.pop(sid, None)
+                    self._recently_injected.pop(sid, None)
             self._last_injected_count = None
 
     _MAX_SESSION_STATES = 64
@@ -621,6 +696,7 @@ class MnemostackProvider(MemoryProvider):
             self._prefetched,
             self._prefetch_gen,
             self._prefetch_threads,
+            self._recently_injected,
         )
 
         def _protected(key: str) -> bool:
