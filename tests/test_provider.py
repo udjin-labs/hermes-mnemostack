@@ -946,3 +946,33 @@ def test_marker_only_memory_does_not_hang_capture(provider):
     assert p.flush_captures(timeout=5.0)  # would hang before the fix
     stored = [i.text for b in fake.remembered for i in b]
     assert "an ordinary follow-up turn" in stored
+
+
+def test_wordless_turns_survive_any_live_provenance(provider):
+    """R5 (agent P1): a punctuation/emoji-only turn must be captured even
+    when the session has fresh SHORT provenance (which it never contained)
+    and even next to a genuinely echoed long span."""
+    p, fake = provider
+    long_fact = "the release checklist lives in the ops handbook appendix"
+    fake.hits = [
+        RecallHit(id="1", text=long_fact, score=0.9),
+        RecallHit(id="2", text="see PR #157", score=0.8),  # short span
+    ]
+    p.queue_prefetch("where is the checklist?")
+    _wait_threads(p)
+    p.prefetch("where is the checklist?")
+
+    # (a) neither span appears in the turn
+    fake.remembered.clear()
+    p.sync_turn("unrelated question about nothing in particular", "👍")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "👍" in stored
+
+    # (b) an emoji reaction alongside a genuinely echoed long span
+    fake.remembered.clear()
+    p.sync_turn(f"{long_fact}", "🙂")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "🙂" in stored  # the reaction is the user's own content
+    assert not any("ops handbook" in t for t in stored)  # the echo is gone
