@@ -151,6 +151,37 @@ def is_configured(hermes_home: str | None = None) -> bool:
         return False
 
 
+NOT_CONFIGURED = (
+    "mnemostack is not configured — run `hermes memory setup` or set "
+    "MNEMOSTACK_MODE (remote: MNEMOSTACK_BASE_URL + MNEMOSTACK_API_KEY)"
+)
+
+
+def availability_problem(hermes_home: str | None = None) -> str | None:
+    """Why this provider is unusable right now — or None when it is usable.
+
+    ONE rule for both callers: the ABC's ``is_available``/
+    ``unavailable_reason`` pair and the `hermes-mnemostack status/doctor`
+    CLI. Two copies would drift, and a CLI that says "available" about a
+    provider hermes then refuses to activate is worse than no CLI.
+
+    Config and installed deps only — no network, per the ABC contract
+    (``doctor`` does the probing, and does it explicitly).
+    """
+    if not is_configured(hermes_home):
+        return NOT_CONFIGURED
+    try:
+        cfg = load_config(hermes_home)
+    except Exception as exc:  # noqa: BLE001 — malformed config = unavailable
+        return f"mnemostack config is invalid: {exc}"
+    if cfg["mode"] == "remote" and not cfg["base_url"]:
+        return (
+            "mnemostack remote mode needs a base_url — set it in "
+            "mnemostack.json or MNEMOSTACK_BASE_URL"
+        )
+    return None
+
+
 def save_config(values: dict[str, Any], hermes_home: str) -> None:
     """Write non-secret config for `hermes memory setup` (secrets go to .env)."""
     clean: dict[str, Any] = {}

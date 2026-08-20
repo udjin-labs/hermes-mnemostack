@@ -47,7 +47,7 @@ except ImportError:  # hermes-agent 0.19
         return stripped.startswith("/") or len(stripped) < 3
 
 from .client import MemoryItem, MnemoStackClient, build_client
-from .config import is_configured, load_config
+from .config import availability_problem, load_config
 from .config import save_config as _save_config_file
 
 logger = logging.getLogger(__name__)
@@ -232,34 +232,16 @@ class MnemostackProvider(MemoryProvider):
 
     def is_available(self) -> bool:
         # Contract: config and deps only, no network. Mode-specific
-        # required fields are validated HERE so hermes reports an
+        # required fields are validated too, so hermes reports an
         # unavailable provider instead of activating one that dies in
-        # initialize() (remote mode without a base_url).
-        if not is_configured():
-            return False
-        try:
-            cfg = load_config()
-        except Exception:  # noqa: BLE001 — malformed config = unavailable
-            return False
-        if cfg["mode"] == "remote" and not cfg["base_url"]:
-            return False
-        return True
+        # initialize() (remote mode without a base_url). The rule itself
+        # lives in config.availability_problem — the `hermes-mnemostack
+        # doctor` CLI reports from the SAME function, so its verdict can
+        # never disagree with what hermes decides.
+        return availability_problem() is None
 
     def unavailable_reason(self) -> str:
-        if is_configured():
-            try:
-                cfg = load_config()
-            except Exception as exc:  # noqa: BLE001
-                return f"mnemostack config is invalid: {exc}"
-            if cfg["mode"] == "remote" and not cfg["base_url"]:
-                return (
-                    "mnemostack remote mode needs a base_url — set it in "
-                    "mnemostack.json or MNEMOSTACK_BASE_URL"
-                )
-        return (
-            "mnemostack is not configured — run `hermes memory setup` or set "
-            "MNEMOSTACK_MODE (remote: MNEMOSTACK_BASE_URL + MNEMOSTACK_API_KEY)"
-        )
+        return availability_problem() or ""
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         self._session_id = session_id

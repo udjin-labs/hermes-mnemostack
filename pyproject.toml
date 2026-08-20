@@ -43,6 +43,9 @@ dev = [
     "mypy>=1.7",
 ]
 
+[project.scripts]
+hermes-mnemostack = "hermes_mnemostack.cli:main"
+
 [project.entry-points."hermes_agent.memory_providers"]
 mnemostack = "hermes_mnemostack.provider:MnemostackProvider"
 
