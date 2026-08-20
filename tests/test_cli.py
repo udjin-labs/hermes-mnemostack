@@ -480,3 +480,75 @@ def test_redacted_locations_stay_valid_urls():
     assert cli._safe_location("/relative/path") == "/relative/path"
     assert cli._safe_location(None) == "unknown"
     assert cli._safe_location("") == "unknown"
+
+
+def test_doctor_reports_a_null_field_instead_of_crashing(tmp_path, capsys):
+    """R4 (review agent P1): the shape check tested key PRESENCE, not type.
+    A null `results` (a proxy, a non-conformant server, a future version
+    emitting null for an empty list) crashed the renderer with a raw
+    traceback — the one thing a diagnostic must never do."""
+
+    class _Health:
+        status_code = 200
+
+        def json(self):
+            return {"status": "ok", "version": "2.2.0"}
+
+    def _http_with(recall_body):
+        class _Recall:
+            status_code = 200
+
+            def json(self):
+                return recall_body
+
+        class _Http:
+            def get(self, _path):
+                return _Health()
+
+            def post(self, *_a, **_k):
+                return _Recall()
+
+        return _Http()
+
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    rc = cli.cmd_doctor(_args("doctor", tmp_path), http=_http_with({"results": None}))
+    assert rc == 1
+    assert "unexpected document" in capsys.readouterr().out
+    # A null degradation list is merely "nothing to report", not a crash.
+    rc = cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_http_with({"results": [], "degraded": None, "notes": None}),
+    )
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "no faults" in out
+
+
+def test_hermes_home_override_restores_an_outer_scope(tmp_path):
+    """R4 (review agent P2): reset(token) restores the PRIOR value; setting
+    the override to None would clear an outer scope instead of restoring
+    it — the nesting every hermes-agent call site relies on."""
+    pytest.importorskip("hermes_constants")
+    import hermes_constants
+
+    outer = hermes_constants.set_hermes_home_override(str(tmp_path / "outer"))
+    try:
+        with cli._hermes_home(str(tmp_path / "inner")):
+            assert hermes_constants.get_hermes_home_override() == str(tmp_path / "inner")
+        assert hermes_constants.get_hermes_home_override() == str(tmp_path / "outer")
+    finally:
+        hermes_constants.reset_hermes_home_override(outer)
+
+
+def test_path_parameters_are_redacted_too():
+    """R4 (review agent P3): ';jsessionid=' is the legacy cookie-less way to
+    carry a session token, and it lives in the PATH — which this function
+    otherwise prints verbatim."""
+    assert cli._safe_location("https://sso.invalid/health;jsessionid=SECRET123") == (
+        "https://sso.invalid/health (query/credentials redacted)"
+    )
+    assert "SECRET" not in cli._safe_location(
+        "https://sso.invalid/a;s=SECRET/b;t=SECRET2?q=SECRET3"
+    )
+    # An ordinary path is still printed in full.
+    assert cli._safe_location("https://sso.invalid/a/b/c") == "https://sso.invalid/a/b/c"

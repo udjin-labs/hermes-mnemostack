@@ -142,20 +142,23 @@ def _hermes_home(path: str | None) -> Iterator[None]:
         yield
         return
     try:
-        from hermes_constants import set_hermes_home_override
-    except Exception:  # noqa: BLE001 — older/newer layout without the hook
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+    except Exception:  # noqa: BLE001 — older/newer layout without the hooks
         yield
         return
     token = set_hermes_home_override(path)
     try:
         yield
     finally:
-        try:
-            from hermes_constants import _HERMES_HOME_OVERRIDE
-
-            _HERMES_HOME_OVERRIDE.reset(token)
-        except Exception:  # noqa: BLE001 — best effort; the process is a CLI
-            set_hermes_home_override(None)
+        # The PUBLIC reset, the one every hermes-agent call site uses:
+        # it restores the token's prior value. Setting the override to None
+        # instead would clear an OUTER override (hermes invoking this
+        # programmatically inside its own profile-scoped context) rather
+        # than restoring it.
+        reset_hermes_home_override(token)
 
 
 def _discovery_check(report: Report, hermes_home: str | None = None) -> None:
@@ -255,10 +258,11 @@ def _safe_location(location: str | None) -> str:
     """Where a redirect points, with the parts that carry secrets removed.
 
     An SSO/proxy redirect routinely carries a token in the query string
-    (and sometimes credentials in the userinfo), and these reports get
-    pasted into support threads. Scheme, host and path answer the
-    operator's question — "where did my base_url send me" — so nothing
-    else is printed.
+    (and sometimes credentials in the userinfo, or a legacy
+    ";jsessionid=" path parameter), and these reports get pasted into
+    support threads. Scheme, host and the bare path answer the operator's
+    question — "where did my base_url send me" — so nothing else is
+    printed.
     """
     if not location:
         return "unknown"
@@ -266,6 +270,12 @@ def _safe_location(location: str | None) -> str:
         from urllib.parse import urlsplit
 
         parts = urlsplit(location)
+        # Path PARAMETERS (";jsessionid=…") are the legacy cookie-less way
+        # to carry a session token, and they live in the path — which this
+        # function otherwise keeps verbatim. Cut each segment at its first
+        # ';' so "the path" stays informative without carrying a secret.
+        path = "/".join(seg.split(";", 1)[0] for seg in parts.path.split("/"))
+        redacted_path = path != parts.path
         host = parts.hostname or ""
         if ":" in host:
             # urlsplit strips an IPv6 literal's brackets; without them back
@@ -275,14 +285,20 @@ def _safe_location(location: str | None) -> str:
         if parts.port:
             host = f"{host}:{parts.port}"
         if not host:
-            shown = parts.path
+            shown = path
         elif parts.scheme:
-            shown = f"{parts.scheme}://{host}{parts.path}"
+            shown = f"{parts.scheme}://{host}{path}"
         else:
             # A scheme-relative Location ("//host/path") is valid; emitting
             # "://host/path" for it would be a URL nobody can follow.
-            shown = f"//{host}{parts.path}"
-        if parts.query or parts.fragment or parts.username or parts.password:
+            shown = f"//{host}{path}"
+        if (
+            parts.query
+            or parts.fragment
+            or parts.username
+            or parts.password
+            or redacted_path
+        ):
             shown += " (query/credentials redacted)"
         return shown or "unknown"
     except Exception:  # noqa: BLE001 — a malformed Location must not leak or crash
@@ -397,26 +413,35 @@ def _report_recall_status(report: Report, resp: Any, *, authed: bool) -> None:
     except Exception:  # noqa: BLE001
         report.add("recall", FAIL, "probe recall returned a non-JSON body")
         return
-    if not isinstance(data, dict) or "results" not in data:
+    # TYPE, not just key presence: a null field is exactly the plausible
+    # malformation this check exists for (a proxy, a non-conformant server,
+    # a future version emitting null for an empty list), and iterating it
+    # would hand the operator a raw traceback instead of the FAIL row a
+    # diagnostic owes them.
+    if not isinstance(data, dict) or not isinstance(data.get("results"), list):
         report.add("recall", FAIL, "probe recall returned an unexpected document")
         return
-    hits = len(data.get("results", []))
+    hits = len(data["results"])
     report.add(
         "recall",
         OK,
         f"read scope confirmed ({hits} hit(s) for a probe query — 0 is normal)"
         + ("" if authed else "; NO key set: the service is running unauthenticated"),
     )
-    _report_degradation(report, data.get("degraded", []), data.get("notes", []))
+    _report_degradation(report, data.get("degraded"), data.get("notes"))
 
 
-def _report_degradation(report: Report, degraded: list[Any], notes: list[Any]) -> None:
+def _report_degradation(report: Report, degraded: Any, notes: Any) -> None:
     """Real faults only. mnemostack 2.2's `degraded` still duplicates the
     routine `notes` tags for back-compat, so the difference — not the raw
     list — is what an operator should act on."""
     from .client import real_faults
 
-    faults = real_faults([str(d) for d in degraded], [str(n) for n in notes])
+    # Coerce before iterating: null/absent/scalar are all "nothing to
+    # report", never a crash inside the report renderer.
+    degraded_list = list(degraded) if isinstance(degraded, list) else []
+    notes = list(notes) if isinstance(notes, list) else []
+    faults = real_faults([str(d) for d in degraded_list], [str(n) for n in notes])
     if faults:
         report.add(
             "retrieval",
