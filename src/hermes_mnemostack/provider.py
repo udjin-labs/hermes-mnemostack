@@ -76,6 +76,26 @@ _INJECTED_MEMORY_MAX = 128
 _BLOCK_BULLET = "-"
 
 
+def _echoed_block_regions(content: str) -> list[tuple[int, int]]:
+    """Spans of ``content`` between an echoed FENCE_OPEN and its close.
+
+    Everything inside such a region was rendered by this provider; text
+    outside it is the caller's, however it is punctuated. Used so short
+    recalled phrases are only removed where they are genuinely ours.
+    """
+    regions: list[tuple[int, int]] = []
+    at = 0
+    while True:
+        start = content.find(FENCE_OPEN, at)
+        if start < 0:
+            return regions
+        end = content.find(FENCE_CLOSE, start + len(FENCE_OPEN))
+        if end < 0:
+            return regions  # unterminated: not a block we rendered
+        regions.append((start, end + len(FENCE_CLOSE)))
+        at = end + len(FENCE_CLOSE)
+
+
 def _framing_prefix_start(content: str, i: int) -> int | None:
     """Index where the line's framing prefix before ``i`` begins.
 
@@ -604,6 +624,7 @@ class MnemostackProvider(MemoryProvider):
         removed |= fence_echoed
 
         if short_spans:
+            block_regions = _echoed_block_regions(content) if fence_echoed else []
             probe = bytearray(mask)
             for text in short_spans:
                 if not text:
@@ -615,10 +636,14 @@ class MnemostackProvider(MemoryProvider):
                         break
                     for j in range(i, i + len(text)):
                         probe[j] = 1
-                    # A short memory sitting on a framing-prefixed line of
-                    # an ECHOED block is not a coincidental word overlap —
-                    # it is our own rendering, so it is really removed.
-                    if fence_echoed and _framing_prefix_start(content, i) is not None:
+                    # A short memory INSIDE an echoed block, on one of its
+                    # framing-prefixed lines, is our own rendering — not a
+                    # coincidental overlap — so it is really removed. The
+                    # same phrase in the caller's own text (even starting a
+                    # line) is theirs and is left alone.
+                    if any(a <= i and i + len(text) <= b for a, b in block_regions) and (
+                        _framing_prefix_start(content, i) is not None
+                    ):
                         for j in range(i, i + len(text)):
                             mask[j] = 1
                     start_at = i + len(text)

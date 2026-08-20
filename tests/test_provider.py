@@ -1238,3 +1238,23 @@ def test_short_memory_in_own_sentence_survives_a_block_echo_turn(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert "I will see PR #157 tomorrow" in stored  # caller's own sentence
     assert not any("eu-central-1" in t for t in stored)  # block content gone
+
+
+def test_short_memory_on_its_own_line_outside_the_block_survives(provider):
+    """R13 (codex P2): removal is scoped to the region BETWEEN the echoed
+    fence markers — the same phrase starting a line of the caller's own
+    text is theirs."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="the staging cluster lives in eu-central-1", score=0.9),
+        RecallHit(id="2", text="see PR #157", score=0.8),
+    ]
+    p.queue_prefetch("where is staging?")
+    _wait_threads(p)
+    block = p.prefetch("where is staging?")
+    fake.remembered.clear()
+    p.sync_turn(f"{block}\n\nsee PR #157 tomorrow", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "see PR #157 tomorrow" in stored  # caller's own line, intact
+    assert not any("eu-central-1" in t for t in stored)
