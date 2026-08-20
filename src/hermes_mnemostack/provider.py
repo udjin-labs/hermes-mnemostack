@@ -77,27 +77,38 @@ _BLOCK_BULLET = "-"
 
 
 def _absorb_block_bullets(content: str, mask: bytearray) -> None:
-    """Mask the bullets this provider renders before recalled memories.
+    """Mask the line prefix that introduces a recalled memory.
 
-    Only a bullet that INTRODUCES a masked span on its own line is
-    absorbed — the caller's own dashes (arithmetic, their own lists) are
-    left alone even when they share a turn with an echoed block. Mutates
-    ``mask`` in place.
+    That prefix is the bullet this provider renders, plus any quote
+    markers the caller wrapped the echo in ("> - recalled text") — all of
+    it is framing around OUR content, none of it is their words. A dash
+    with real text before it on the line is the caller's (arithmetic,
+    their own list) and is left alone even in a turn that echoes a block.
+    Mutates ``mask`` in place.
     """
     for i, masked in enumerate(mask):
         if not masked or (i and mask[i - 1]):
             continue  # only the START of a masked run matters
-        j = i - 1
-        while j >= 0 and content[j] in " \t":
-            j -= 1
-        if j < 0 or content[j] != _BLOCK_BULLET:
-            continue
-        k = j - 1
-        while k >= 0 and content[k] in " \t":
-            k -= 1
+        # Walk back over framing only: whitespace, quote markers, and at
+        # most one bullet. Reaching the line start means everything
+        # between it and the span is framing around OUR content.
+        k = i - 1
+        seen_bullet = False
+        while k >= 0:
+            ch = content[k]
+            if ch in " \t\r>":
+                k -= 1
+                continue
+            if ch == _BLOCK_BULLET and not seen_bullet:
+                seen_bullet = True
+                k -= 1
+                continue
+            break
         if k >= 0 and content[k] != "\n":
-            continue  # mid-line dash: the caller's, not ours
-        for t in range(j, i):
+            continue  # real text precedes on this line — the caller's
+        if k + 1 == i:
+            continue  # nothing to absorb
+        for t in range(k + 1, i):
             mask[t] = 1
 
 

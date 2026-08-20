@@ -1166,3 +1166,20 @@ def test_callers_own_dashes_survive_a_same_turn_block_echo(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert "reminder -" in stored
     assert not any("recalled fact" in t for t in stored)
+
+
+def test_quoted_block_echo_drops_our_bullets(provider):
+    """R12 (codex P2): an echo is often markdown-quoted ('> - fact') — the
+    bullet is still ours and must not survive into the stored memory."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="first recalled fact about deploys", score=0.9)]
+    p.queue_prefetch("give me the fact")
+    _wait_threads(p)
+    block = p.prefetch("give me the fact")
+    quoted = "\n".join(f"> {line}" for line in block.split("\n"))
+    fake.remembered.clear()
+    p.sync_turn(f"{quoted}\n\nnoted for later", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "noted for later" in stored  # exactly the caller's words
+    assert not any("recalled fact" in t for t in stored)
