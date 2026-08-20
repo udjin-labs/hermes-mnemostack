@@ -81,6 +81,20 @@ def test_unconfigured_provider_is_unavailable(monkeypatch, tmp_path):
     assert "hermes memory setup" in p.unavailable_reason()
 
 
+def test_available_provider_has_no_unavailable_reason(monkeypatch, tmp_path):
+    """R1 (review agent P3): the old branch chain fell through to "not
+    configured" even when the provider WAS configured — it lied about a
+    working provider. Pinned so the shared-rule refactor cannot regress
+    into it, and so the ""-when-available contract is explicit rather than
+    resting on a commit message."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("MNEMOSTACK_MODE", "remote")
+    monkeypatch.setenv("MNEMOSTACK_BASE_URL", "http://memory.invalid:8080")
+    p = MnemostackProvider()
+    assert p.is_available() is True
+    assert p.unavailable_reason() == ""
+
+
 def test_prefetch_cycle_and_recall_status(provider):
     p, fake = provider
     fake.hits = [
