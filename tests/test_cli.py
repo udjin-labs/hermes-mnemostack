@@ -459,8 +459,10 @@ def test_a_redirect_location_is_printed_without_its_secrets(tmp_path, capsys):
     assert cli.cmd_doctor(_args("doctor", tmp_path, as_json=True), http=_Http()) == 1
     out = capsys.readouterr().out
     assert "SECRET-abc123" not in out
-    assert "user:pw" not in out and "frag" not in out
+    assert "user:pw" not in out and "#frag" not in out
     assert "sso.invalid/authorize" in out  # the useful half survives
+    # The suffix names what went missing rather than a fixed phrase.
+    assert "credentials, query, fragment redacted" in out
 
 
 def test_redacted_locations_stay_valid_urls():
@@ -470,11 +472,11 @@ def test_redacted_locations_stay_valid_urls():
     or host and port run together into an ambiguous address."""
     assert (
         cli._safe_location("//sso.invalid/login?token=x")
-        == "//sso.invalid/login (query/credentials redacted)"
+        == "//sso.invalid/login (query redacted)"
     )
     assert (
         cli._safe_location("https://[2001:db8::1]:8443/authorize?t=x")
-        == "https://[2001:db8::1]:8443/authorize (query/credentials redacted)"
+        == "https://[2001:db8::1]:8443/authorize (query redacted)"
     )
     assert cli._safe_location("https://plain.invalid/x") == "https://plain.invalid/x"
     assert cli._safe_location("/relative/path") == "/relative/path"
@@ -545,10 +547,47 @@ def test_path_parameters_are_redacted_too():
     carry a session token, and it lives in the PATH — which this function
     otherwise prints verbatim."""
     assert cli._safe_location("https://sso.invalid/health;jsessionid=SECRET123") == (
-        "https://sso.invalid/health (query/credentials redacted)"
+        "https://sso.invalid/health (path parameters redacted)"
     )
     assert "SECRET" not in cli._safe_location(
         "https://sso.invalid/a;s=SECRET/b;t=SECRET2?q=SECRET3"
     )
     # An ordinary path is still printed in full.
     assert cli._safe_location("https://sso.invalid/a/b/c") == "https://sso.invalid/a/b/c"
+
+
+def test_a_secret_in_the_host_position_is_not_printed():
+    """R5 (review agent P1): the round-4 fix cut ';' out of the PATH only,
+    and urlsplit hands "evil.com;jsessionid=SECRET" over as the host — so
+    the same class of secret, one position earlier, printed verbatim with
+    no marker at all. The function is constructive now: a host that is not
+    a hostname is not printed, and the suffix names what was withheld."""
+    for loc in (
+        "https://evil.com;jsessionid=SECRET-ABC/health",
+        "https://user:pw@evil.com;jsessionid=SECRET-ABC/health",
+        "https://evil.com:8080;jsessionid=SECRET-ABC/health",
+    ):
+        shown = cli._safe_location(loc)
+        assert "SECRET" not in shown.upper(), (loc, shown)
+        assert "host" in shown  # and the reader is told the host went missing
+    # Ordinary hosts, ports and IPv6 literals still survive intact.
+    assert cli._safe_location("https://ok.invalid:8443/x") == "https://ok.invalid:8443/x"
+    assert (
+        cli._safe_location("https://[2001:db8::1]/x") == "https://[2001:db8::1]/x"
+    )
+
+
+def test_the_redaction_marker_names_what_it_removed():
+    """R5 (review agent P3): the marker always read "query/credentials
+    redacted", which overstated a run that had only cut a path parameter —
+    an operator diffing the printed string against the raw header could
+    not tell what had actually been withheld."""
+    assert cli._safe_location("https://a.invalid/p;s=1") == (
+        "https://a.invalid/p (path parameters redacted)"
+    )
+    assert cli._safe_location("https://a.invalid/p?q=1") == (
+        "https://a.invalid/p (query redacted)"
+    )
+    assert cli._safe_location("https://u:p@a.invalid/p#f") == (
+        "https://a.invalid/p (credentials, fragment redacted)"
+    )

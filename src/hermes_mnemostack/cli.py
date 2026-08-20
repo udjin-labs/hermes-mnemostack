@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -254,15 +255,30 @@ def _probe_remote(report: Report, cfg: dict[str, Any], http: Any | None = None) 
         client.close()
 
 
-def _safe_location(location: str | None) -> str:
-    """Where a redirect points, with the parts that carry secrets removed.
+#: A hostname, positively: letters, digits, dots and hyphens. Anything
+#: else in the host position is not a hostname — it is something else
+#: wearing one, and it is not printed.
+_HOSTNAME_RE = re.compile(r"^[A-Za-z0-9.\-]+$")
+#: An IPv6 literal, positively: hex digits, colons, and the dots of an
+#: embedded IPv4 tail.
+_IPV6_RE = re.compile(r"^[0-9A-Fa-f:.]+$")
 
-    An SSO/proxy redirect routinely carries a token in the query string
-    (and sometimes credentials in the userinfo, or a legacy
-    ";jsessionid=" path parameter), and these reports get pasted into
-    support threads. Scheme, host and the bare path answer the operator's
-    question — "where did my base_url send me" — so nothing else is
-    printed.
+
+def _safe_location(location: str | None) -> str:
+    """Where a redirect points, printed from validated parts only.
+
+    An SSO/proxy redirect routinely carries a secret — a token in the
+    query string, credentials in the userinfo, a legacy ";jsessionid="
+    parameter — and these reports get pasted into support threads.
+
+    The contract is deliberately CONSTRUCTIVE rather than a list of
+    places to strip: every earlier attempt at the latter left a position
+    uncovered (the path, then the host), because "where a secret can sit
+    in a URL" is not a bounded list. So nothing here is passed through:
+    the answer is rebuilt from a scheme, a host that matches the hostname
+    grammar, a numeric port, and path segments cut at their first ';'.
+    Whatever did not survive validation is named in the suffix, so the
+    reader knows what was withheld rather than guessing.
     """
     if not location:
         return "unknown"
@@ -270,36 +286,53 @@ def _safe_location(location: str | None) -> str:
         from urllib.parse import urlsplit
 
         parts = urlsplit(location)
-        # Path PARAMETERS (";jsessionid=…") are the legacy cookie-less way
-        # to carry a session token, and they live in the path — which this
-        # function otherwise keeps verbatim. Cut each segment at its first
-        # ';' so "the path" stays informative without carrying a secret.
+        removed: list[str] = []
+        # Path parameters (";jsessionid=…") are the cookie-less way to carry
+        # a session token, and they live in the path.
         path = "/".join(seg.split(";", 1)[0] for seg in parts.path.split("/"))
-        redacted_path = path != parts.path
-        host = parts.hostname or ""
-        if ":" in host:
+        if path != parts.path:
+            removed.append("path parameters")
+        try:
+            port = parts.port
+        except ValueError:
+            # urlsplit only validates the port when it is READ, and a
+            # non-numeric one means the authority is not what it claims.
+            port, host = None, ""
+            removed.append("host")
+        else:
+            host = parts.hostname or ""
+            if host and not (
+                _HOSTNAME_RE.match(host)
+                or (":" in host and _IPV6_RE.match(host))
+            ):
+                # e.g. "evil.com;jsessionid=SECRET" — urlsplit hands the
+                # whole thing over as the "host", and printing it verbatim
+                # would leak exactly what this function exists to remove.
+                host = ""
+                removed.append("host")
+        if host and ":" in host:
             # urlsplit strips an IPv6 literal's brackets; without them back
             # the host runs into the port and the destination we print is
             # ambiguous rather than merely redacted.
             host = f"[{host}]"
-        if parts.port:
-            host = f"{host}:{parts.port}"
+        if host and port:
+            host = f"{host}:{port}"
+        if parts.username or parts.password:
+            removed.append("credentials")
+        if parts.query:
+            removed.append("query")
+        if parts.fragment:
+            removed.append("fragment")
         if not host:
-            shown = path
+            shown = path or "(redacted)"
         elif parts.scheme:
             shown = f"{parts.scheme}://{host}{path}"
         else:
             # A scheme-relative Location ("//host/path") is valid; emitting
             # "://host/path" for it would be a URL nobody can follow.
             shown = f"//{host}{path}"
-        if (
-            parts.query
-            or parts.fragment
-            or parts.username
-            or parts.password
-            or redacted_path
-        ):
-            shown += " (query/credentials redacted)"
+        if removed:
+            shown += f" ({', '.join(removed)} redacted)"
         return shown or "unknown"
     except Exception:  # noqa: BLE001 — a malformed Location must not leak or crash
         return "unparseable (redacted)"
