@@ -49,6 +49,11 @@ def test_lifecycle_is_callable(monkeypatch, tmp_path):
         def recall(self, query, *, limit=5, filters=None):
             return []
 
+        def recall_detailed(self, query, *, limit=5, filters=None):
+            from hermes_mnemostack.client import RecallOutcome
+
+            return RecallOutcome()
+
         def remember(self, items):
             raise AssertionError("no capture expected in this test")
 

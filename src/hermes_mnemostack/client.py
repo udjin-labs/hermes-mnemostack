@@ -59,6 +59,29 @@ class MemoryItem:
 
 
 @dataclass(frozen=True)
+class RecallOutcome:
+    """Hits plus REAL faults for this recall.
+
+    mnemostack 2.2 splits recall signals: ``notes`` is the authoritative
+    list of routine ones (e.g. ``temporal:no_parse`` — a query with no
+    parsable time expression), while ``degraded`` still duplicates those
+    same routine tags for back-compat until the next major. So a genuine
+    fault is exactly ``degraded - notes``; treating all of ``degraded``
+    as breakage would report perfectly healthy calls as degraded.
+    """
+
+    hits: list[RecallHit] = field(default_factory=list)
+    faults: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+
+def real_faults(degraded: list[str], notes: list[str]) -> list[str]:
+    """Entries in ``degraded`` that are not routine ``notes`` signals."""
+    routine = set(notes or ())
+    return [d for d in (degraded or ()) if d not in routine]
+
+
+@dataclass(frozen=True)
 class RememberOutcome:
     stored: int
     duplicates: int
@@ -69,6 +92,10 @@ class MnemoStackClient(Protocol):
     def recall(
         self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
     ) -> list[RecallHit]: ...
+
+    def recall_detailed(
+        self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
+    ) -> RecallOutcome: ...
 
     def remember(self, items: list[MemoryItem]) -> RememberOutcome: ...
 
@@ -135,20 +162,30 @@ class RemoteClient:
     def recall(
         self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
     ) -> list[RecallHit]:
+        return self.recall_detailed(query, limit=limit, filters=filters).hits
+
+    def recall_detailed(
+        self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
+    ) -> RecallOutcome:
         payload: dict[str, Any] = {"query": query, "limit": limit}
         if filters:
             payload["filters"] = filters
         data = self._request("POST", "/recall", payload)
-        return [
-            RecallHit(
-                id=str(r.get("id", "")),
-                text=str(r.get("text", "")),
-                score=float(r.get("score", 0.0)),
-                sources=list(r.get("retrievers", [])),
-                payload=dict(r.get("metadata", {})),
-            )
-            for r in data.get("results", [])
-        ]
+        notes = [str(n) for n in data.get("notes", [])]
+        return RecallOutcome(
+            hits=[
+                RecallHit(
+                    id=str(r.get("id", "")),
+                    text=str(r.get("text", "")),
+                    score=float(r.get("score", 0.0)),
+                    sources=list(r.get("retrievers", [])),
+                    payload=dict(r.get("metadata", {})),
+                )
+                for r in data.get("results", [])
+            ],
+            faults=real_faults([str(d) for d in data.get("degraded", [])], notes),
+            notes=notes,
+        )
 
     @staticmethod
     def _chunkable(it: MemoryItem) -> MemoryItem:
@@ -272,6 +309,11 @@ class LocalClient:
     def recall(
         self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
     ) -> list[RecallHit]:
+        return self.recall_detailed(query, limit=limit, filters=filters).hits
+
+    def recall_detailed(
+        self, query: str, *, limit: int = 5, filters: dict[str, Any] | None = None
+    ) -> RecallOutcome:
         merged = dict(filters or {})
         merged.update(self._scope)  # scope always wins — never widen it
         # The NATIVE tenant parameter, not a tenant_id filter: it rides
@@ -279,23 +321,34 @@ class LocalClient:
         # the recaller's filter_by_tenant backstop — a future bm25/graph
         # arm stays isolated automatically.
         tkw: dict[str, Any] = {"tenant": self._tenant} if self._tenant is not None else {}
+        from mnemostack.recall import RecallTrace
+
+        trace = RecallTrace()
         results = self._recaller.recall(
             query,
             limit=limit,
             vector_limit=max(limit, self._overfetch),
             filters=merged or None,
+            trace=trace,
             **tkw,
         )
-        return [
-            RecallHit(
-                id=str(r.id),
-                text=r.text,
-                score=float(r.score),
-                sources=list(getattr(r, "sources", [])),
-                payload=dict(getattr(r, "payload", {}) or {}),
-            )
-            for r in results
-        ]
+        notes = [str(n) for n in getattr(trace, "notes", [])]
+        return RecallOutcome(
+            hits=[
+                RecallHit(
+                    id=str(r.id),
+                    text=r.text,
+                    score=float(r.score),
+                    sources=list(getattr(r, "sources", [])),
+                    payload=dict(getattr(r, "payload", {}) or {}),
+                )
+                for r in results
+            ],
+            faults=real_faults(
+                [str(d) for d in getattr(trace, "degraded", [])], notes
+            ),
+            notes=notes,
+        )
 
     def remember(self, items: list[MemoryItem]) -> RememberOutcome:
         from mnemostack.ingest import (

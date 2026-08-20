@@ -101,3 +101,27 @@ def test_client_error_carries_status_code(service_app):
         raise AssertionError("expected MnemostackClientError")
     except MnemostackClientError as e:
         assert e.status_code == 400
+
+
+def test_routine_notes_are_not_reported_as_faults(service_app):
+    """mnemostack 2.2 duplicates routine `notes` tags into `degraded` for
+    back-compat until the next major — a real fault is exactly
+    degraded-minus-notes. Reporting all of `degraded` would flag healthy
+    recalls as broken."""
+    from hermes_mnemostack.client import real_faults
+
+    app, _store, _emb, keys = service_app
+    c = _client(app, keys["alpha"])
+    c.remember([MemoryItem(text="a fact about deploys", source="s")])
+    # A query with no parsable time expression emits the routine
+    # temporal:no_parse signal on a real service.
+    out = c.recall_detailed("deploys", limit=5)
+    assert out.faults == [] or all(f not in out.notes for f in out.faults)
+    for note in out.notes:
+        assert note not in out.faults
+
+    # Unit contract, independent of what this deployment happens to emit.
+    assert real_faults(["temporal:no_parse"], ["temporal:no_parse"]) == []
+    assert real_faults(["vector:error", "temporal:no_parse"], ["temporal:no_parse"]) == [
+        "vector:error"
+    ]

@@ -290,18 +290,20 @@ class MnemostackProvider(MemoryProvider):
                 # Tool results are shown to the model just like injected
                 # blocks — same provenance treatment, or a fact the model
                 # searched for and then stated gets re-captured.
-                if hits:
+                # The tool response must carry EXACTLY the text provenance
+                # records, or an echo of what the model saw is not matched.
+                shown = [(h, self._display_text(h.text)) for h in hits]
+                if shown:
                     with self._lock:
                         self._note_injected_locked(
-                            self._session_key(),
-                            tuple(self._display_text(h.text) for h in hits),
+                            self._session_key(), tuple(t for _h, t in shown)
                         )
                 return json.dumps(
                     {
                         "ok": True,
                         "results": [
-                            {"id": h.id, "text": h.text, "score": round(h.score, 4)}
-                            for h in hits
+                            {"id": h.id, "text": text, "score": round(h.score, 4)}
+                            for h, text in shown
                         ],
                     },
                     ensure_ascii=False,
@@ -359,7 +361,18 @@ class MnemostackProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                hits = client.recall(query, limit=int(self._cfg["recall_limit"]))
+                outcome = client.recall_detailed(
+                    query, limit=int(self._cfg["recall_limit"])
+                )
+                hits = outcome.hits
+                if outcome.faults:
+                    # `degraded` still duplicates routine `notes` tags for
+                    # back-compat until mnemostack 3.0 — only entries
+                    # ABSENT from notes are real breakage. Logging the raw
+                    # degraded list would flag healthy recalls.
+                    logger.warning(
+                        "mnemostack recall degraded: %s", ", ".join(outcome.faults)
+                    )
             except Exception as exc:  # noqa: BLE001 — recall must never break a turn
                 logger.warning("mnemostack prefetch failed: %s", exc)
                 hits = []
@@ -428,11 +441,11 @@ class MnemostackProvider(MemoryProvider):
             seen[text] = turn
         while len(seen) > _INJECTED_MEMORY_MAX:
             seen.pop(next(iter(seen)))
-        while len(self._recently_injected) > self._MAX_SESSION_STATES:
-            oldest = next(iter(self._recently_injected))
-            if oldest == key:
-                break
-            self._recently_injected.pop(oldest)
+        # ONE eviction policy for session state: the shared prune, which
+        # protects sessions with undelivered work and evicts a victim from
+        # every dict at once. A second local loop here would evict
+        # protected sessions and desync them across dicts.
+        self._prune_session_dicts_locked(protect=key)
 
     def _strip_injected(self, content: str, key: str) -> str:
         """Remove spans this session was recently shown from turn text.
@@ -449,7 +462,25 @@ class MnemostackProvider(MemoryProvider):
             turn = self._turn_index.get(key, 0)
         if not seen:
             return content
-        out = content
+        # Spans are located in the ORIGINAL text and masked — never by
+        # rewriting `out` in place: replacing one span can splice its
+        # neighbours into a byte sequence that equals ANOTHER tracked
+        # span, which would then be cut although the user never wrote it.
+        mask = bytearray(len(content))
+        removed = False
+
+        def _mask(span: str) -> bool:
+            hit = False
+            start = 0
+            while True:
+                i = content.find(span, start)
+                if i < 0:
+                    return hit
+                for j in range(i, i + len(span)):
+                    mask[j] = 1
+                hit = True
+                start = i + len(span)
+
         for text, injected_turn in sorted(
             seen.items(), key=lambda kv: len(kv[0]), reverse=True
         ):
@@ -458,19 +489,31 @@ class MnemostackProvider(MemoryProvider):
             if len(text) < _MIN_SUPPRESSED_SPAN:
                 # Short spans still suppress an EXACT whole-turn echo, but
                 # are not cut out of a longer utterance (coincidence).
-                if " ".join(out.split()) == text:
+                if " ".join(content.split()) == text:
                     return ""
                 continue
-            if text in out:
-                out = out.replace(text, " ")
+            removed |= _mask(text)
         # Fence markers are presentation-only; if a whole block bounced
         # back, its markers are noise in the captured text.
-        out = out.replace(FENCE_OPEN, " ").replace(FENCE_CLOSE, " ")
-        out = " ".join(out.split())
+        for marker in (FENCE_OPEN, FENCE_CLOSE):
+            removed |= _mask(marker)
+        if not removed:
+            # Nothing was an echo — capture stays VERBATIM. (Normalizing
+            # unconditionally would flatten every multi-line message, code
+            # block and table, and would drop punctuation/emoji-only turns
+            # for 8 turns after any recall.)
+            return content
+        out = " ".join(
+            "".join(ch for ch, m in zip(content, mask, strict=True) if not m).split()
+        )
         # What survives a full block echo is list punctuation ("- -") —
         # residue with no word characters carries no memory worth storing.
         if not any(ch.isalnum() for ch in out):
             return ""
+        logger.debug(
+            "mnemostack capture: removed recalled span(s) from a %s-char turn",
+            len(content),
+        )
         return out
 
     def recall_status(self) -> RecallStatus | None:

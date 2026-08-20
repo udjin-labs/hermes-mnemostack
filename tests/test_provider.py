@@ -8,11 +8,23 @@ import time
 
 import pytest
 
-from hermes_mnemostack.client import MemoryItem, RecallHit, RememberOutcome
+from hermes_mnemostack.client import (
+    MemoryItem,
+    RecallHit,
+    RecallOutcome,
+    RememberOutcome,
+)
 from hermes_mnemostack.provider import MnemostackProvider
 
 
-class FakeClient:
+class _DetailedMixin:
+    """Test doubles implement recall(); the provider calls recall_detailed."""
+
+    def recall_detailed(self, query, *, limit=5, filters=None):
+        return RecallOutcome(hits=self.recall(query, limit=limit, filters=filters))
+
+
+class FakeClient(_DetailedMixin):
     def __init__(self, hits=None):
         self.hits = hits or []
         self.remembered: list[list[MemoryItem]] = []
@@ -186,7 +198,7 @@ def test_stale_prefetch_never_overwrites_fresher_result(provider):
     p, fake = provider
     slow_release = _threading.Event()
 
-    class _RacingClient:
+    class _RacingClient(_DetailedMixin):
         def recall(self, query, *, limit=5, filters=None):
             if query == "slow-old-query":
                 slow_release.wait(timeout=5.0)
@@ -283,7 +295,7 @@ def test_concurrent_session_prefetch_joins_own_thread(provider):
     p, fake = provider
     a_release = _threading.Event()
 
-    class _TwoSessionClient:
+    class _TwoSessionClient(_DetailedMixin):
         def recall(self, query, *, limit=5, filters=None):
             if "session-a" in query:
                 a_release.wait(timeout=5.0)
@@ -362,7 +374,7 @@ def test_session_churn_never_evicts_inflight_prefetch(provider):
     p, fake = provider
     release = _threading.Event()
 
-    class _MixedClient:
+    class _MixedClient(_DetailedMixin):
         def recall(self, query, *, limit=5, filters=None):
             if "active" in query:
                 release.wait(timeout=5.0)
@@ -410,7 +422,7 @@ def test_generations_survive_reset_and_eviction(provider):
     p, fake = provider
     release = _threading.Event()
 
-    class _SlowThenFast:
+    class _SlowThenFast(_DetailedMixin):
         def recall(self, query, *, limit=5, filters=None):
             if "old" in query:
                 release.wait(timeout=5.0)
@@ -487,7 +499,7 @@ def test_fresh_queue_survives_all_protected_prune(provider):
     p, fake = provider
     release = _threading.Event()
 
-    class _Slow:
+    class _Slow(_DetailedMixin):
         def recall(self, query, *, limit=5, filters=None):
             release.wait(timeout=5.0)
             return [RecallHit(id="x", text=f"answer to {query}", score=0.9)]
@@ -632,7 +644,7 @@ def test_tool_errors_are_data_not_exceptions(provider):
 
     p, fake = provider
 
-    class _Boom:
+    class _Boom(_DetailedMixin):
         def recall(self, *a, **k):
             from hermes_mnemostack.client import MnemostackClientError
 
@@ -819,3 +831,63 @@ def test_provenance_is_session_scoped(provider):
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert any("release train" in t for t in stored)  # B captured it
+
+
+def test_non_echo_turns_are_captured_verbatim(provider):
+    """R3 (codex P1 + agent P1): with provenance live, a turn that echoes
+    nothing must keep its exact bytes — multi-line content is not
+    flattened, and a punctuation/emoji-only reaction is not dropped."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="the deploy window is Friday 15:00", score=0.9)]
+    p.queue_prefetch("when do we deploy?")
+    _wait_threads(p)
+    p.prefetch("when do we deploy?")  # provenance now live
+
+    code = "def f():\n    return 1\n\n# note\n"
+    p.sync_turn(code, "👍")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert code.strip() in stored  # newlines preserved, not collapsed
+    assert "👍" in stored  # emoji-only reply survives
+
+
+def test_removal_cannot_synthesize_a_false_match(provider):
+    """R3 (agent P2): masking spans in the ORIGINAL text — replacing one
+    span in place could splice neighbours into another tracked span and
+    wipe content the user never echoed."""
+    p, fake = provider
+    long_a = "x" * 40
+    spliced = "confirmedthedeploywindow willnow"  # what a naive replace forms
+    fake.hits = [
+        RecallHit(id="1", text=long_a, score=0.9),
+        RecallHit(id="2", text=spliced, score=0.8),
+    ]
+    p.queue_prefetch("give me both memories")
+    _wait_threads(p)
+    p.prefetch("give me both memories")
+    fake.remembered.clear()
+    p.sync_turn(f"confirmedthedeploywindow{long_a}willnow", "ok")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    # long_a is cut (a real echo); the surrounding NEW words survive.
+    assert any("confirmedthedeploywindow" in t and "willnow" in t for t in stored)
+
+
+def test_provenance_eviction_uses_the_shared_prune(provider):
+    """R3 (agent P2): ONE eviction policy — provenance is evicted with the
+    rest of a session's state, never on its own. A second local loop
+    pruned only _recently_injected, so an active session could lose its
+    provenance while the rest of its state survived."""
+    p, fake = provider
+    p._MAX_SESSION_STATES = 3
+    fake.hits = [RecallHit(id="1", text="a memory long enough to track", score=0.9)]
+    for i in range(8):
+        sid = f"sess-{i}"
+        p.queue_prefetch(f"question for {sid}", session_id=sid)
+        _wait_threads(p)
+        p.prefetch(f"question for {sid}", session_id=sid)  # consume → provenance
+    with p._lock:
+        # Session-level eviction keeps the two dicts in lockstep; per-dict
+        # pruning of provenance alone would leave gens without provenance.
+        assert set(p._recently_injected) == set(p._prefetch_gen)
+        assert len(p._recently_injected) <= 2 * p._MAX_SESSION_STATES
