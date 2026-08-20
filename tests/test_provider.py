@@ -1294,6 +1294,15 @@ def test_tool_descriptions_promise_no_specific_retrieval_arms(provider):
     search = next(
         t for t in p.get_tool_schemas() if t["name"] == "mnemostack_search"
     )
+    import re
+
     text = f"{search['description']} {p.system_prompt_block()}".lower()
+    # Word boundaries: "graph" is a substring of paragraph/demographic, and
+    # a false failure invites someone to weaken this guard rather than
+    # reword an innocent sentence.
     for promise in ("lexical", "temporal", "graph", "bm25", "hybrid"):
-        assert promise not in text, promise
+        assert not re.search(rf"\b{promise}\b", text), promise
+    # The guard still fires on a real re-introduction.
+    assert re.search(r"\bgraph\b", "graph recall") and not re.search(
+        r"\bgraph\b", "a short paragraph of context"
+    )
