@@ -19,6 +19,8 @@ pip install hermes-mnemostack
 hermes memory setup   # select "mnemostack"
 ```
 
+Requires mnemostack >= 2.2 (on PyPI) and hermes-agent >= 0.19.
+
 The provider registers through the `hermes_agent.memory_providers` entry
 point; hermes-agent discovers it automatically once the package is installed
 in the same environment. Note: pip entry-point discovery requires

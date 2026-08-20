@@ -79,9 +79,14 @@ class MnemostackProvider(MemoryProvider):
         self._turn_index: dict[str, int] = {}
         self._prefetched: dict[str, tuple[str, int]] = {}
         self._prefetch_gen: dict[str, int] = {}
+        # Single field by ABC design: recall_status() takes no session_id
+        # and the host calls it "right after prefetch, on the same
+        # (single) turn thread" — that serialization is the ABC's own
+        # contract, not an assumption of ours.
         self._last_injected_count: int | None = None
-        self._prefetch_thread: threading.Thread | None = None
+        self._prefetch_threads: dict[str, threading.Thread] = {}
         self._sync_threads: list[threading.Thread] = []
+        self._shutting_down = False
 
     # -- Required ABC surface -------------------------------------------------
 
@@ -157,6 +162,7 @@ class MnemostackProvider(MemoryProvider):
             # memories for a previous query.
             gen = self._prefetch_gen.get(key, 0) + 1
             self._prefetch_gen[key] = gen
+            self._prune_session_dicts_locked()
 
         def _run() -> None:
             try:
@@ -171,14 +177,18 @@ class MnemostackProvider(MemoryProvider):
 
         t = threading.Thread(target=_run, daemon=True, name="mnemostack-prefetch")
         with self._lock:
-            self._prefetch_thread = t
+            # Per-SESSION thread reference: joining some other session's
+            # thread would return this session's block as empty while its
+            # own recall is still in flight.
+            self._prefetch_threads[key] = t
         t.start()
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         # Serve the cached background result; if the thread is still in
         # flight give it a short grace window rather than blocking a turn.
         key = session_id or ""
-        t = self._prefetch_thread
+        with self._lock:
+            t = self._prefetch_threads.get(key)
         if t is not None and t.is_alive():
             t.join(timeout=2.0)
         with self._lock:
@@ -219,6 +229,8 @@ class MnemostackProvider(MemoryProvider):
     ) -> None:
         if self._client is None or not self._cfg.get("capture", True):
             return
+        if self._shutting_down:
+            return  # racing a shutdown: the client is about to close
         if self._agent_context != "primary":
             # Cron/subagent/flush contexts must not pollute user memory.
             return
@@ -226,6 +238,7 @@ class MnemostackProvider(MemoryProvider):
         with self._lock:
             turn = self._turn_index.get(sid, 0)
             self._turn_index[sid] = turn + 1
+            self._prune_session_dicts_locked()
         items = []
         for role, content in (("user", user_content), ("assistant", assistant_content)):
             content = (content or "").strip()
@@ -260,7 +273,14 @@ class MnemostackProvider(MemoryProvider):
                     )
                 return
             except Exception as exc:  # noqa: BLE001
-                if len(items) < 2:
+                # Retry per item only when it can help: a service-side
+                # VALIDATION rejection (4xx other than auth) means one bad
+                # item poisoned the batch. Transport errors (no status) and
+                # permanent conditions (revoked key, exhausted quota) fail
+                # identically per item — pure overhead during an outage.
+                status = getattr(exc, "status_code", None)
+                retryable = status is not None and status not in (401, 403, 429, 507)
+                if len(items) < 2 or not retryable:
                     logger.warning("mnemostack sync_turn failed: %s", exc)
                     return
                 logger.warning(
@@ -278,9 +298,13 @@ class MnemostackProvider(MemoryProvider):
 
         t = threading.Thread(target=_sync, daemon=True, name="mnemostack-sync")
         with self._lock:
+            # Prune BEFORE appending and START inside the lock: an
+            # unstarted thread reports is_alive() False, so a concurrent
+            # sync_turn's prune could otherwise drop it from the drain
+            # list before it ever ran.
             self._sync_threads = [x for x in self._sync_threads if x.is_alive()]
             self._sync_threads.append(t)
-        t.start()
+            t.start()
 
     def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
         # v1: the evicted turns were already captured by sync_turn (same
@@ -306,13 +330,32 @@ class MnemostackProvider(MemoryProvider):
                 for sid in (old, new_session_id, ""):
                     self._turn_index.pop(sid, None)
                     self._prefetched.pop(sid, None)
+                    self._prefetch_gen.pop(sid, None)
+                    self._prefetch_threads.pop(sid, None)
             self._last_injected_count = None
+
+    _MAX_SESSION_STATES = 64
+
+    def _prune_session_dicts_locked(self) -> None:
+        """Bound the per-session dicts on long-running multi-session hosts
+        (insertion-ordered: oldest sessions evict first). Caller holds
+        the lock."""
+        for d in (
+            self._turn_index,
+            self._prefetched,
+            self._prefetch_gen,
+            self._prefetch_threads,
+        ):
+            while len(d) > self._MAX_SESSION_STATES:
+                d.pop(next(iter(d)))
 
     def shutdown(self) -> None:
         # Drain EVERY in-flight capture (not just the newest) before the
         # shared client closes underneath them; one overall time budget.
+        # The flag closes the race with a sync_turn arriving mid-drain.
         import time as _time
 
+        self._shutting_down = True
         with self._lock:
             pending = [t for t in self._sync_threads if t.is_alive()]
             self._sync_threads = []

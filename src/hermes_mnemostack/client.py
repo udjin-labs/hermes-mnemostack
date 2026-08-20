@@ -154,7 +154,10 @@ class RemoteClient:
     def _chunkable(it: MemoryItem) -> MemoryItem:
         """The chunk contract requires offset 0 (chunk offsets are computed
         server-side) — for a long item at a non-zero offset, fold the
-        offset into the source so the deterministic id stays unique."""
+        offset into the source so the deterministic id stays unique.
+        Assumption: hermes sources are "hermes/{platform}/{session}" and
+        never naturally contain "#o<digits>"; ids also hash the full text,
+        so a crafted collision additionally needs identical content."""
         if len(it.text) <= REMOTE_TEXT_CAP or it.offset == 0:
             return it
         from dataclasses import replace
@@ -223,10 +226,17 @@ class LocalClient:
 
     @staticmethod
     def _scope_tenant(scope: dict[str, str] | None) -> str | None:
-        """Canonical, order-independent tenant string for a scope dict."""
+        """Canonical, order-independent, INJECTIVE tenant string.
+
+        Canonical JSON, not a delimiter join: scope values come from
+        host-supplied identity strings with no character restrictions, and
+        a bare "k=v|k=v" encoding lets crafted values collide two
+        different scopes into one tenant."""
         if not scope:
             return None
-        return "|".join(f"{k}={scope[k]}" for k in sorted(scope))
+        import json
+
+        return json.dumps(scope, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     def __init__(
         self,
@@ -264,13 +274,17 @@ class LocalClient:
     ) -> list[RecallHit]:
         merged = dict(filters or {})
         merged.update(self._scope)  # scope always wins — never widen it
-        if self._tenant is not None:
-            merged["tenant_id"] = self._tenant
+        # The NATIVE tenant parameter, not a tenant_id filter: it rides
+        # every tenant-aware retriever, gates non-aware ones, and keeps
+        # the recaller's filter_by_tenant backstop — a future bm25/graph
+        # arm stays isolated automatically.
+        tkw: dict[str, Any] = {"tenant": self._tenant} if self._tenant is not None else {}
         results = self._recaller.recall(
             query,
             limit=limit,
             vector_limit=max(limit, self._overfetch),
             filters=merged or None,
+            **tkw,
         )
         return [
             RecallHit(

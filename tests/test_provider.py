@@ -54,9 +54,8 @@ def provider(monkeypatch, tmp_path):
 
 def _wait_threads(p: MnemostackProvider, timeout=3.0):
     deadline = time.monotonic() + timeout
-    threads = list(p._sync_threads)
-    if p._prefetch_thread is not None:
-        threads.append(p._prefetch_thread)
+    with p._lock:
+        threads = list(p._sync_threads) + list(p._prefetch_threads.values())
     for t in threads:
         t.join(timeout=max(0.0, deadline - time.monotonic()))
 
@@ -273,3 +272,82 @@ def test_sessions_do_not_share_prefetch_or_turn_state(provider):
     _wait_threads(p)
     offsets = {batch[0].source: batch[0].offset for batch in fake.remembered}
     assert offsets["hermes/cli/A"] == 0 and offsets["hermes/cli/B"] == 0
+
+
+def test_concurrent_session_prefetch_joins_own_thread(provider):
+    """R2 (both reviewers): session A's prefetch must join A's OWN thread —
+    joining B's (fast) thread returned A's block as empty while A's recall
+    was still in flight."""
+    import threading as _threading
+
+    p, fake = provider
+    a_release = _threading.Event()
+
+    class _TwoSessionClient:
+        def recall(self, query, *, limit=5, filters=None):
+            if "session-a" in query:
+                a_release.wait(timeout=5.0)
+                return [RecallHit(id="a", text="A block", score=0.9)]
+            return [RecallHit(id="b", text="B block", score=0.9)]
+
+        def close(self):
+            pass
+
+    p._client = _TwoSessionClient()
+    p.queue_prefetch("session-a slow question", session_id="A")
+    p.queue_prefetch("session-b fast question", session_id="B")
+    with p._lock:
+        b_thread = p._prefetch_threads["B"]
+    b_thread.join(timeout=3.0)  # B done; A still blocked
+    a_release.set()  # A releases; its prefetch() below must join A's thread
+    assert "A block" in p.prefetch("session-a slow question", session_id="A")
+    assert "B block" in p.prefetch("session-b fast question", session_id="B")
+
+
+def test_scope_tenant_encoding_is_injective():
+    """R2 (both reviewers): crafted identity strings with '|'/'=' must not
+    collide two scopes into one tenant."""
+    from hermes_mnemostack.client import LocalClient
+
+    t1 = LocalClient._scope_tenant(
+        {"hermes_profile": "a", "hermes_user": "b|hermes_user=c"}
+    )
+    t2 = LocalClient._scope_tenant(
+        {"hermes_profile": "a|hermes_user=b", "hermes_user": "c"}
+    )
+    assert t1 != t2
+    # Canonical: order-independent.
+    assert LocalClient._scope_tenant({"x": "1", "y": "2"}) == LocalClient._scope_tenant(
+        {"y": "2", "x": "1"}
+    )
+
+
+def test_sync_after_shutdown_is_a_noop(provider):
+    """R2 (agent P3): a sync_turn racing shutdown must not spawn a capture
+    against a closing client."""
+    p, fake = provider
+    p.shutdown()
+    p.sync_turn("late turn", "late reply")
+    assert p._sync_threads == [] and fake.remembered == []
+
+
+def test_transport_failure_skips_pointless_per_item_retry(provider):
+    """R2 (agent P3): a dead service fails per item exactly like the batch —
+    retry only on validation-class rejections."""
+    p, fake = provider
+    calls = []
+
+    class _DeadClient:
+        def remember(self, items):
+            calls.append(len(items))
+            from hermes_mnemostack.client import MnemostackClientError
+
+            raise MnemostackClientError("unreachable")  # no status_code
+
+        def close(self):
+            pass
+
+    p._client = _DeadClient()
+    p.sync_turn("u", "a")
+    _wait_threads(p)
+    assert calls == [2]  # one batch attempt, no per-item storm
