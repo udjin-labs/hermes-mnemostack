@@ -1207,7 +1207,12 @@ def test_mixed_length_block_echo_leaves_no_short_memory(provider):
 
 def test_short_memory_outside_a_block_is_still_coincidence_safe(provider):
     """The short-span rule stays narrow: without an echoed block, a short
-    recalled phrase inside the caller's own sentence is NOT cut."""
+    recalled phrase inside the caller's own sentence is NOT cut.
+
+    Forward guard, not a regression pin: this shape was already safe
+    before the block-scoped removal landed (the early verbatim return
+    covers it), so it kills no mutant in that change — it exists to keep
+    the property if the early return is ever restructured."""
     p, fake = provider
     fake.hits = [RecallHit(id="1", text="see PR #157", score=0.9)]
     p.queue_prefetch("which PR was that?")
