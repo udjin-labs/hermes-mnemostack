@@ -475,9 +475,12 @@ def test_unconsumed_block_survives_session_churn(provider):
     p.queue_prefetch("victim question", session_id="victim")
     _wait_threads(p)  # completed, cached, NOT consumed
     fake.hits = []
+    # Serially: concurrent filler threads are all protected at once, which
+    # can trip the hard cap and evict the victim — timing-dependent, and
+    # not what this pin is about.
     for i in range(5):
         p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
-    _wait_threads(p)
+        _wait_threads(p)
     assert "victim cached block" in p.prefetch("victim question", session_id="victim")
 
 
@@ -976,3 +979,52 @@ def test_wordless_turns_survive_any_live_provenance(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert "🙂" in stored  # the reaction is the user's own content
     assert not any("ops handbook" in t for t in stored)  # the echo is gone
+
+
+def test_wordless_memory_echo_is_still_suppressed(provider):
+    """R7 (codex P1): the wordless-turn guard must not shelter an ACTUAL
+    echo — a memory that is itself wordless ("👍") re-sent verbatim is
+    still an echo and must not be re-stored."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="👍", score=0.9)]
+    p.queue_prefetch("what did they react with?")
+    _wait_threads(p)
+    p.prefetch("what did they react with?")
+    fake.remembered.clear()
+    p.sync_turn("👍", "acknowledged that reaction")
+    _wait_threads(p)
+    roles = [i.metadata["hermes_role"] for b in fake.remembered for i in b]
+    assert roles == ["assistant"]  # the echoed 👍 is suppressed
+
+
+def test_reaction_in_the_same_string_as_an_echo_survives(provider):
+    """R7 (agent P1): a reaction sent in the SAME message as a quoted
+    recalled fact is the user's own content — only the echo goes."""
+    p, fake = provider
+    fact = "the release checklist lives in the ops handbook appendix"
+    fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
+    p.queue_prefetch("where is the checklist?")
+    _wait_threads(p)
+    p.prefetch("where is the checklist?")
+    fake.remembered.clear()
+    p.sync_turn(f"{fact} 👍", f"👍 {fact}")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert stored == ["👍", "👍"]  # echoes removed, reactions kept
+
+
+def test_block_echo_leaves_no_bullet_residue(provider):
+    """The bullets of an echoed BLOCK are formatting, not content — they
+    must not be stored as a memory of '- -'."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="first recalled fact about deploys", score=0.9),
+        RecallHit(id="2", text="second recalled fact about staging", score=0.8),
+    ]
+    p.queue_prefetch("give me the facts")
+    _wait_threads(p)
+    block = p.prefetch("give me the facts")
+    fake.remembered.clear()
+    p.sync_turn(block, block)
+    _wait_threads(p)
+    assert fake.remembered == []

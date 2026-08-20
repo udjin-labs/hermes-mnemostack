@@ -517,18 +517,26 @@ class MnemostackProvider(MemoryProvider):
         removed = False
         for text in long_spans:
             removed |= _mask(text)
-        # Fence markers are presentation-only; if a whole block bounced
-        # back, its markers are noise in the captured text.
-        for marker in (FENCE_OPEN, FENCE_CLOSE):
-            removed |= _mask(marker)
 
         # Short spans are NOT cut out of real content (a few words
         # appearing mid-sentence is coincidence, not an echo) — but a turn
         # whose ENTIRE remainder is short recalled spans is a pure echo,
         # so they are evaluated against the post-mask residual, not the
         # raw text (a long span alongside a short one used to leak).
-        had_words = any(ch.isalnum() for ch in content)
-        if short_spans and had_words:
+        # Fence markers are presentation-only; if a whole block bounced
+        # back, its markers are noise — and their presence is what
+        # distinguishes BLOCK artifacts (list bullets) from a user's own
+        # wordless reaction.
+        fence_echoed = False
+        for marker in (FENCE_OPEN, FENCE_CLOSE):
+            fence_echoed |= _mask(marker)
+        removed |= fence_echoed
+
+        # Short spans are NOT cut out of real content (a few words
+        # appearing mid-sentence is coincidence, not an echo) — but a turn
+        # whose ENTIRE remainder is short recalled spans is a pure echo,
+        # so they are evaluated against the post-mask residual.
+        if short_spans:
             probe = bytearray(mask)
             matched_short = False
             for text in short_spans:
@@ -543,14 +551,7 @@ class MnemostackProvider(MemoryProvider):
                         probe[j] = 1
                     matched_short = True
                     start_at = i + len(text)
-            # Collapse ONLY when this turn's own words were echoes: a
-            # short span merely being fresh in the session must not drop a
-            # turn that never contained it (an emoji-only reaction has no
-            # words at all and is guarded by `had_words` above).
-            if (
-                (removed or matched_short)
-                and not any(ch.isalnum() for ch in _residual(probe))
-            ):
+            if (removed or matched_short) and not _residual(probe).strip():
                 return ""
 
         if not removed:
@@ -560,11 +561,12 @@ class MnemostackProvider(MemoryProvider):
             # for 8 turns after any recall.)
             return content
         out = " ".join(_residual(mask).split())
-        # What survives a full block echo is list punctuation ("- -") —
-        # residue with no word characters carries no memory worth storing.
-        # Guarded by had_words: a turn that never had words (an emoji
-        # reaction next to a recalled span) keeps its own content.
-        if had_words and not any(ch.isalnum() for ch in out):
+        if not out:
+            return ""  # the turn was nothing but recalled spans
+        if fence_echoed and not any(ch.isalnum() for ch in out):
+            # List punctuation ("- -") left by an echoed BLOCK carries no
+            # memory. Residue from a plain span echo is the caller's own
+            # content (a "👍" sent alongside a quoted fact) and is kept.
             return ""
         logger.debug(
             "mnemostack capture: removed recalled span(s) from a %s-char turn",
