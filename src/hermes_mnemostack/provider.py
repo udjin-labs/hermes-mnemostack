@@ -76,6 +76,31 @@ _INJECTED_MEMORY_MAX = 128
 _BLOCK_BULLET = "-"
 
 
+def _absorb_block_bullets(content: str, mask: bytearray) -> None:
+    """Mask the bullets this provider renders before recalled memories.
+
+    Only a bullet that INTRODUCES a masked span on its own line is
+    absorbed — the caller's own dashes (arithmetic, their own lists) are
+    left alone even when they share a turn with an echoed block. Mutates
+    ``mask`` in place.
+    """
+    for i, masked in enumerate(mask):
+        if not masked or (i and mask[i - 1]):
+            continue  # only the START of a masked run matters
+        j = i - 1
+        while j >= 0 and content[j] in " \t":
+            j -= 1
+        if j < 0 or content[j] != _BLOCK_BULLET:
+            continue
+        k = j - 1
+        while k >= 0 and content[k] in " \t":
+            k -= 1
+        if k >= 0 and content[k] != "\n":
+            continue  # mid-line dash: the caller's, not ours
+        for t in range(j, i):
+            mask[t] = 1
+
+
 def _is_pure_echo(content: str, mask: bytearray) -> bool:
     """Whether every WORD in this turn came from recalled content.
 
@@ -562,10 +587,6 @@ class MnemostackProvider(MemoryProvider):
             fence_echoed |= _mask(marker)
         removed |= fence_echoed
 
-        # Short spans are NOT cut out of real content (a few words
-        # appearing mid-sentence is coincidence, not an echo) — but a turn
-        # whose ENTIRE remainder is short recalled spans is a pure echo,
-        # so they are evaluated against the post-mask residual.
         if short_spans:
             probe = bytearray(mask)
             for text in short_spans:
@@ -591,14 +612,11 @@ class MnemostackProvider(MemoryProvider):
             # block and table, and would drop punctuation/emoji-only turns
             # for 8 turns after any recall.)
             return content
+        if fence_echoed:
+            _absorb_block_bullets(content, mask)
         if _is_pure_echo(content, mask):
             return ""
-        tokens = _residual(mask).split()
-        if fence_echoed:
-            # A block was echoed: its bullets are ours, and only they are
-            # dropped — any other token is the caller's own content.
-            tokens = [t for t in tokens if t != _BLOCK_BULLET]
-        out = " ".join(tokens)
+        out = " ".join(_residual(mask).split())
         if not out:
             return ""
         logger.debug(

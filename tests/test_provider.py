@@ -1132,3 +1132,37 @@ def test_mixed_block_echo_drops_only_our_bullets(provider):
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert "well - yes, that works" in stored
+
+
+def test_callers_own_dashes_survive_a_same_turn_block_echo(provider):
+    """R11 (agent P2): only the bullet that INTRODUCES a recalled memory is
+    ours. A caller's arithmetic minus or their own list, sent in the SAME
+    turn as an echoed block, must survive intact."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="first recalled fact about deploys", score=0.9)]
+    p.queue_prefetch("give me the fact")
+    _wait_threads(p)
+    block = p.prefetch("give me the fact")
+    fake.remembered.clear()
+    p.sync_turn(f"{block}\n\nAlso: 5 - 3 = 2 and 10 - 7 = 3", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "Also: 5 - 3 = 2 and 10 - 7 = 3" in stored
+    assert not any("recalled fact" in t for t in stored)
+
+    fake.remembered.clear()
+    p.sync_turn(f"{block}\n- my own item one\n- my own item two", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "- my own item one - my own item two" in stored
+
+    # A dash the caller writes MID-LINE directly before an echoed span is
+    # theirs (a real bullet only ever starts its line).
+    fake.remembered.clear()
+    p.sync_turn(
+        f"{block}\nreminder - first recalled fact about deploys", "ack"
+    )
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "reminder -" in stored
+    assert not any("recalled fact" in t for t in stored)
