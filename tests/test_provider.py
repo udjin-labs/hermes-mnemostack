@@ -351,3 +351,82 @@ def test_transport_failure_skips_pointless_per_item_retry(provider):
     p.sync_turn("u", "a")
     _wait_threads(p)
     assert calls == [2]  # one batch attempt, no per-item storm
+
+
+def test_session_churn_never_evicts_inflight_prefetch(provider):
+    """R3 (agent P2): filler-session churn past the LRU bound must not drop
+    an active session's in-flight recall on the floor."""
+    import threading as _threading
+
+    p, fake = provider
+    release = _threading.Event()
+
+    class _MixedClient:
+        def recall(self, query, *, limit=5, filters=None):
+            if "active" in query:
+                release.wait(timeout=5.0)
+                return [RecallHit(id="a", text="active block", score=0.9)]
+            return []
+
+        def close(self):
+            pass
+
+    p._client = _MixedClient()
+    p._MAX_SESSION_STATES = 2  # tighten the bound for the test
+    p.queue_prefetch("active slow question", session_id="active")
+    for i in range(5):
+        p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
+    release.set()
+    assert "active block" in p.prefetch("active slow question", session_id="active")
+
+
+def test_generations_survive_reset_and_eviction(provider):
+    """R3 (codex P2): a reset (or eviction) must not recycle generation
+    numbers — an old in-flight worker finishing last would pass the gate
+    and inject stale memories."""
+    import threading as _threading
+
+    p, fake = provider
+    release = _threading.Event()
+
+    class _SlowThenFast:
+        def recall(self, query, *, limit=5, filters=None):
+            if "old" in query:
+                release.wait(timeout=5.0)
+                return [RecallHit(id="o", text="STALE from before reset", score=0.9)]
+            return [RecallHit(id="n", text="FRESH after reset", score=0.9)]
+
+        def close(self):
+            pass
+
+    p._client = _SlowThenFast()
+    p.queue_prefetch("old question", session_id="S")
+    p.on_session_switch("S", reset=True)  # in-flight worker must be orphaned
+    p.queue_prefetch("new question", session_id="S")
+    _wait_threads(p)
+    release.set()
+    time.sleep(0.2)
+    block = p.prefetch("new question", session_id="S")
+    assert "FRESH" in block and "STALE" not in block
+
+
+def test_5xx_skips_per_item_retry(provider):
+    """R3 (both reviewers): an overloaded service answering 503 fails per
+    item exactly like the batch — no retry storm."""
+    p, fake = provider
+    calls = []
+
+    class _OutageClient:
+        def remember(self, items):
+            calls.append(len(items))
+            from hermes_mnemostack.client import MnemostackClientError
+
+            raise MnemostackClientError("boom", status_code=503)
+
+        def close(self):
+            pass
+
+    p._client = _OutageClient()
+    p.sync_turn("u", "a")
+    _wait_threads(p)
+    assert calls == [2]

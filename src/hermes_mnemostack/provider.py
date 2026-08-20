@@ -78,6 +78,12 @@ class MnemostackProvider(MemoryProvider):
         # provider's own session (single-session CLI).
         self._turn_index: dict[str, int] = {}
         self._prefetched: dict[str, tuple[str, int]] = {}
+        # Generations come from ONE monotonic counter, never recycled per
+        # key: a reset or LRU eviction that restarted a session's count
+        # would let an old in-flight worker's generation collide with a
+        # fresh one and inject stale memories. With a global counter an
+        # evicted/reset key simply gets a strictly newer generation.
+        self._prefetch_gen_counter = 0
         self._prefetch_gen: dict[str, int] = {}
         # Single field by ABC design: recall_status() takes no session_id
         # and the host calls it "right after prefetch, on the same
@@ -159,8 +165,11 @@ class MnemostackProvider(MemoryProvider):
         with self._lock:
             # Generation gate: an outrun earlier recall finishing AFTER a
             # newer one must not overwrite the fresher block with stale
-            # memories for a previous query.
-            gen = self._prefetch_gen.get(key, 0) + 1
+            # memories for a previous query. pop-then-assign refreshes the
+            # key's recency for the LRU bound (plain assignment would not).
+            self._prefetch_gen_counter += 1
+            gen = self._prefetch_gen_counter
+            self._prefetch_gen.pop(key, None)
             self._prefetch_gen[key] = gen
             self._prune_session_dicts_locked()
 
@@ -172,7 +181,8 @@ class MnemostackProvider(MemoryProvider):
                 hits = []
             block = self._format_hits(hits)
             with self._lock:
-                if self._prefetch_gen.get(key, 0) == gen:
+                if self._prefetch_gen.get(key) == gen:
+                    self._prefetched.pop(key, None)
                     self._prefetched[key] = (block, len(hits))
 
         t = threading.Thread(target=_run, daemon=True, name="mnemostack-prefetch")
@@ -180,6 +190,7 @@ class MnemostackProvider(MemoryProvider):
             # Per-SESSION thread reference: joining some other session's
             # thread would return this session's block as empty while its
             # own recall is still in flight.
+            self._prefetch_threads.pop(key, None)
             self._prefetch_threads[key] = t
         t.start()
 
@@ -236,7 +247,9 @@ class MnemostackProvider(MemoryProvider):
             return
         sid = session_id or self._session_id
         with self._lock:
-            turn = self._turn_index.get(sid, 0)
+            # pop-then-assign: refresh recency so an active session is not
+            # the LRU-eviction victim just because it was created first.
+            turn = self._turn_index.pop(sid, 0)
             self._turn_index[sid] = turn + 1
             self._prune_session_dicts_locked()
         items = []
@@ -279,7 +292,14 @@ class MnemostackProvider(MemoryProvider):
                 # permanent conditions (revoked key, exhausted quota) fail
                 # identically per item — pure overhead during an outage.
                 status = getattr(exc, "status_code", None)
-                retryable = status is not None and status not in (401, 403, 429, 507)
+                # Validation-class 4xx ONLY: 5xx (dead/overloaded service)
+                # and auth/rate/quota conditions fail per item exactly like
+                # the batch — retrying is a request storm, not a rescue.
+                retryable = (
+                    status is not None
+                    and 400 <= status < 500
+                    and status not in (401, 403, 429)
+                )
                 if len(items) < 2 or not retryable:
                     logger.warning("mnemostack sync_turn failed: %s", exc)
                     return
@@ -337,9 +357,17 @@ class MnemostackProvider(MemoryProvider):
     _MAX_SESSION_STATES = 64
 
     def _prune_session_dicts_locked(self) -> None:
-        """Bound the per-session dicts on long-running multi-session hosts
-        (insertion-ordered: oldest sessions evict first). Caller holds
-        the lock."""
+        """Bound the per-session dicts on long-running multi-session hosts.
+
+        Recency-ordered (touch sites pop-then-assign), and a session with
+        a LIVE prefetch thread is never the victim — evicting it would
+        drop its own in-flight recall on the floor under session churn.
+        Caller holds the lock."""
+
+        def _alive(key: str) -> bool:
+            t = self._prefetch_threads.get(key)
+            return t is not None and t.is_alive()
+
         for d in (
             self._turn_index,
             self._prefetched,
@@ -347,7 +375,10 @@ class MnemostackProvider(MemoryProvider):
             self._prefetch_threads,
         ):
             while len(d) > self._MAX_SESSION_STATES:
-                d.pop(next(iter(d)))
+                victim = next((k for k in d if not _alive(k)), None)
+                if victim is None:
+                    break  # everything in flight — hold the line
+                d.pop(victim)
 
     def shutdown(self) -> None:
         # Drain EVERY in-flight capture (not just the newest) before the
