@@ -1028,3 +1028,38 @@ def test_block_echo_leaves_no_bullet_residue(provider):
     p.sync_turn(block, block)
     _wait_threads(p)
     assert fake.remembered == []
+
+
+def test_formatted_short_echo_still_collapses(provider):
+    """R8 (codex P1): a short echo wrapped in quotes or a bullet is still
+    a pure echo — presentation must not defeat suppression."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="see PR #157", score=0.9)]
+    p.queue_prefetch("which PR was that?")
+    _wait_threads(p)
+    p.prefetch("which PR was that?")
+    for shape in ('"see PR #157"', "- see PR #157", "`see PR #157`"):
+        fake.remembered.clear()
+        p.sync_turn(shape, "ack")
+        _wait_threads(p)
+        stored = [i.text for b in fake.remembered for i in b]
+        assert not any("PR #157" in t for t in stored), shape
+
+
+def test_reaction_appended_to_a_block_echo_survives(provider):
+    """R8 (codex P2): dropping bullet residue must not drop the caller's
+    own reaction sent with the echoed block."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="first recalled fact about deploys", score=0.9),
+        RecallHit(id="2", text="second recalled fact about staging", score=0.8),
+    ]
+    p.queue_prefetch("give me the facts")
+    _wait_threads(p)
+    block = p.prefetch("give me the facts")
+    fake.remembered.clear()
+    p.sync_turn(f"{block} 👍", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "👍" in stored
+    assert not any("recalled fact" in t for t in stored)

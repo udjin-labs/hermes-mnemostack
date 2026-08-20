@@ -70,6 +70,23 @@ FENCE_CLOSE = "\u23a3 end recalled memory \u23a6"
 #: same fact). Also caps the per-session set size.
 _INJECTED_MEMORY_TURNS = 8
 _INJECTED_MEMORY_MAX = 128
+#: Characters our own recall block contributes around memories (bullets)
+#: plus the quoting/markup a caller adds when echoing one. Residue made
+#: ONLY of these carries no content: it is presentation, not memory.
+_PRESENTATION_CHARS = "-•*|>#`\"'“”‘’«»()[]{}"
+
+
+def _meaningful(text: str) -> str:
+    """Text with presentation artifacts and whitespace removed.
+
+    Emoji and words survive; bullets, quotes and brackets do not. Used to
+    decide whether what remains after removing echoes is the caller's own
+    content or just the formatting they wrapped it in."""
+    return "".join(
+        ch for ch in text if not ch.isspace() and ch not in _PRESENTATION_CHARS
+    )
+
+
 #: A recalled span is only worth suppressing if it carries content; a
 #: two-word fragment appearing inside a sentence is coincidence, not an
 #: echo, and cutting it would mangle a legitimately new memory.
@@ -551,7 +568,9 @@ class MnemostackProvider(MemoryProvider):
                         probe[j] = 1
                     matched_short = True
                     start_at = i + len(text)
-            if (removed or matched_short) and not _residual(probe).strip():
+            # Formatting-tolerant: a short echo wrapped in quotes or a
+            # bullet ('"see PR #157"') is still a pure echo.
+            if (removed or matched_short) and not _meaningful(_residual(probe)):
                 return ""
 
         if not removed:
@@ -561,13 +580,13 @@ class MnemostackProvider(MemoryProvider):
             # for 8 turns after any recall.)
             return content
         out = " ".join(_residual(mask).split())
-        if not out:
-            return ""  # the turn was nothing but recalled spans
-        if fence_echoed and not any(ch.isalnum() for ch in out):
-            # List punctuation ("- -") left by an echoed BLOCK carries no
-            # memory. Residue from a plain span echo is the caller's own
-            # content (a "👍" sent alongside a quoted fact) and is kept.
-            return ""
+        if fence_echoed:
+            # Our own block bullets are not the caller's content — drop
+            # artifact-only tokens, keep everything else (a "👍" appended
+            # to an echoed block is still the caller's reaction).
+            out = " ".join(tok for tok in out.split() if _meaningful(tok))
+        if not _meaningful(out):
+            return ""  # nothing but recalled spans and presentation
         logger.debug(
             "mnemostack capture: removed recalled span(s) from a %s-char turn",
             len(content),
