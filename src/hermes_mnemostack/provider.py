@@ -366,9 +366,13 @@ class MnemostackProvider(MemoryProvider):
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         import json
 
-        # The ABC forwards **kwargs; hosts serving concurrent sessions pass
-        # session_id here, and provenance must land on the session that
-        # actually saw the result (not the last one to touch the provider).
+        # Forward-looking: the ABC forwards **kwargs, but hermes-agent
+        # 0.19 (the floor) calls handle_tool_call with none — unlike
+        # prefetch/sync_turn, it does not thread session_id today, so on
+        # that host this resolves to the provider's own session exactly as
+        # before. Reading it here means provenance lands on the CALLING
+        # session the moment a host starts passing it. Tracked upstream
+        # as a gap in the ABC's tool path.
         session_key = self._session_key(str(kwargs.get("session_id", "") or ""))
         client = self._client
         if client is None:

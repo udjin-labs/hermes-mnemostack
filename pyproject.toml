@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-mnemostack"
 version = "0.1.0.dev0"
-description = "mnemostack memory provider for hermes-agent: hybrid semantic/BM25/temporal/graph recall as the agent's persistent memory"
+description = "mnemostack memory provider for hermes-agent: persistent agent memory over a mnemostack service or a local Qdrant"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
