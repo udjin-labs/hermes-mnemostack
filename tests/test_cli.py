@@ -591,3 +591,78 @@ def test_an_unfollowable_target_is_reported_by_shape():
     assert "no host" in cli._safe_location("/relative/path")
     assert "malformed" in cli._safe_location("https://evil.invalid;x=1/health")
     assert "malformed" in cli._safe_location("https://evil.invalid:99999/x")
+
+
+def _forging_http(health_body, recall_body=None):
+    class _Resp:
+        def __init__(self, body):
+            self.status_code = 200
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class _Http:
+        def get(self, _path):
+            return _Resp(health_body)
+
+        def post(self, *_a, **_k):
+            return _Resp(recall_body or {"results": [], "degraded": [], "notes": []})
+
+    return _Http()
+
+
+def test_a_hostile_server_cannot_forge_a_report_row(tmp_path, capsys):
+    """R8 (review agent P1): the plain-text renderer prints one line per
+    check, so a newline inside a server-supplied field appends a line that
+    reads exactly like a genuine passing check — in the output an operator
+    uses to decide whether their deployment is healthy. Same threat model
+    the redirect line spent seven rounds closing, one call site over."""
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    forged = "2.2.0)\n✓ FORGED-ROW  everything is totally fine ("
+    cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_forging_http({"status": "ok", "version": forged}),
+    )
+    out = capsys.readouterr().out
+    assert "FORGED-ROW" in out  # the text is still reported, inline...
+    # ...but it cannot BE a row: no line STARTS with a verdict glyph it
+    # supplied, and the rendered row count still equals the check count.
+    assert not any(ln.startswith("✓ FORGED-ROW") for ln in out.splitlines())
+    cli.cmd_doctor(
+        _args("doctor", tmp_path, as_json=True),
+        http=_forging_http({"status": "ok", "version": forged}),
+    )
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    rows = [ln for ln in out.splitlines() if ln[:1] in ("✓", "!", "✗")]
+    assert len(rows) == len(checks)
+
+
+def test_a_forged_row_cannot_ride_in_on_a_degradation_tag(tmp_path, capsys):
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_forging_http(
+            {"status": "ok", "version": "2.2.0"},
+            {
+                "results": [],
+                "degraded": ["arm:failed)\n✓ FORGED-VIA-DEGRADED  fine ("],
+                "notes": [],
+            },
+        ),
+    )
+    out = capsys.readouterr().out
+    assert not any(
+        line.lstrip().startswith("✓") and "FORGED-VIA-DEGRADED" in line
+        for line in out.splitlines()
+    )
+
+
+def test_an_unbounded_field_cannot_flood_the_report(tmp_path, capsys):
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    cli.cmd_doctor(
+        _args("doctor", tmp_path),
+        http=_forging_http({"status": "ok", "version": "v" * 10_000}),
+    )
+    out = capsys.readouterr().out
+    assert max(len(line) for line in out.splitlines()) < 500

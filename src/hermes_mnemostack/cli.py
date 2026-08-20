@@ -45,12 +45,38 @@ class Check:
     remedy: str = ""
 
 
+#: Control characters have no business in a report row. A newline in one
+#: lets a hostile server FORGE a row: the plain-text renderer prints one
+#: line per check, so "2.2.0)\n\u2713 FORGED  all fine (" arrives as an
+#: extra line that looks exactly like a genuine passing check in the
+#: output an operator reads — or pastes into a support thread — to decide
+#: whether their deployment is healthy.
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#: And a row is a row, not a document: an unbounded field would flood the
+#: report even without a newline in it.
+_ROW_MAX_CHARS = 300
+
+
+def _row_text(value: Any) -> str:
+    """One row's worth of text, whatever the value was.
+
+    Applied at the single point where rows are created, so a field that
+    reaches a report from a SERVER response — a /health version, a
+    degradation tag — cannot forge structure no matter which call site it
+    travelled through.
+    """
+    cleaned = _CONTROL_RE.sub(" ", str(value))
+    if len(cleaned) > _ROW_MAX_CHARS:
+        cleaned = cleaned[: _ROW_MAX_CHARS - 1] + "\u2026"
+    return cleaned
+
+
 @dataclass
 class Report:
     checks: list[Check] = field(default_factory=list)
 
     def add(self, name: str, status: str, detail: str, remedy: str = "") -> Check:
-        check = Check(name, status, detail, remedy)
+        check = Check(_row_text(name), status, _row_text(detail), _row_text(remedy))
         self.checks.append(check)
         return check
 
