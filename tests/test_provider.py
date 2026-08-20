@@ -1107,3 +1107,28 @@ def test_block_of_short_memories_echoes_through_the_probe_path(provider):
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert stored == ["ack"]  # the block echo contributed no words of its own
+
+
+def test_mixed_block_echo_drops_only_our_bullets(provider):
+    """R10 (codex P2): a block echo with real words appended must store
+    the words — not our own recall-block bullets alongside them."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="first recalled fact about deploys", score=0.9),
+        RecallHit(id="2", text="second recalled fact about staging", score=0.8),
+    ]
+    p.queue_prefetch("give me the facts")
+    _wait_threads(p)
+    block = p.prefetch("give me the facts")
+    fake.remembered.clear()
+    p.sync_turn(f"{block} noted for later", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "noted for later" in stored  # exactly the caller's words
+    assert not any("-" in t for t in stored if t != "ack")
+    # A dash the CALLER writes in ordinary text is untouched.
+    fake.remembered.clear()
+    p.sync_turn("well - yes, that works", "ok")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "well - yes, that works" in stored

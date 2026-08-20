@@ -70,6 +70,12 @@ FENCE_CLOSE = "\u23a3 end recalled memory \u23a6"
 #: same fact). Also caps the per-session set size.
 _INJECTED_MEMORY_TURNS = 8
 _INJECTED_MEMORY_MAX = 128
+#: The bullet _format_hits renders before each memory. Echoed back, it is
+#: OUR artifact, not the caller's content — removing exactly this token
+#: (not a general punctuation taxonomy) keeps mixed echoes clean.
+_BLOCK_BULLET = "-"
+
+
 def _is_pure_echo(content: str, mask: bytearray) -> bool:
     """Whether every WORD in this turn came from recalled content.
 
@@ -587,7 +593,12 @@ class MnemostackProvider(MemoryProvider):
             return content
         if _is_pure_echo(content, mask):
             return ""
-        out = " ".join(_residual(mask).split())
+        tokens = _residual(mask).split()
+        if fence_echoed:
+            # A block was echoed: its bullets are ours, and only they are
+            # dropped — any other token is the caller's own content.
+            tokens = [t for t in tokens if t != _BLOCK_BULLET]
+        out = " ".join(tokens)
         if not out:
             return ""
         logger.debug(
@@ -625,7 +636,7 @@ class MnemostackProvider(MemoryProvider):
             return ""
         lines = [FENCE_OPEN]
         for h in hits:
-            lines.append(f"- {cls._display_text(h.text)}")
+            lines.append(f"{_BLOCK_BULLET} {cls._display_text(h.text)}")
         lines.append(FENCE_CLOSE)
         return "\n".join(lines)
 
