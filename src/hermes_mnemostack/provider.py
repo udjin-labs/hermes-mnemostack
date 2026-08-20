@@ -437,6 +437,10 @@ class MnemostackProvider(MemoryProvider):
         seen = self._recently_injected.setdefault(key, {})
         turn = self._turn_index.get(key, 0)
         for text in texts:
+            if not text:
+                # A memory made only of fence glyphs sanitizes to "" — an
+                # empty span matches everywhere and advances no scan.
+                continue
             seen.pop(text, None)
             seen[text] = turn
         while len(seen) > _INJECTED_MEMORY_MAX:
@@ -465,7 +469,7 @@ class MnemostackProvider(MemoryProvider):
         fresh = [
             text
             for text, injected_turn in seen.items()
-            if turn - injected_turn <= _INJECTED_MEMORY_TURNS
+            if text and turn - injected_turn <= _INJECTED_MEMORY_TURNS
         ]
         if not fresh:
             return content
@@ -476,6 +480,8 @@ class MnemostackProvider(MemoryProvider):
         mask = bytearray(len(content))
 
         def _mask(span: str) -> bool:
+            if not span:
+                return False  # an empty span never advances the scan
             hit = False
             start_at = 0
             while True:
@@ -524,6 +530,8 @@ class MnemostackProvider(MemoryProvider):
         if short_spans:
             probe = bytearray(mask)
             for text in short_spans:
+                if not text:
+                    continue
                 start_at = 0
                 while True:
                     i = content.find(text, start_at)

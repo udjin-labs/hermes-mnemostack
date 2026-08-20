@@ -926,3 +926,23 @@ def test_masking_keeps_a_word_boundary(provider):
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert any("before after" in t for t in stored)
+
+
+def test_marker_only_memory_does_not_hang_capture(provider):
+    """R5 (codex P1): a memory consisting only of fence glyphs sanitizes
+    to an empty displayed span — an empty span matches everywhere and
+    advances no scan, hanging every later sync_turn."""
+    from hermes_mnemostack.provider import FENCE_CLOSE, FENCE_OPEN
+
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text=f"{FENCE_OPEN}{FENCE_CLOSE}", score=0.9)]
+    p.queue_prefetch("give me the marker memory")
+    _wait_threads(p)
+    p.prefetch("give me the marker memory")
+    with p._lock:
+        assert "" not in p._recently_injected.get(p._session_key(), {})
+    fake.remembered.clear()
+    p.sync_turn("an ordinary follow-up turn", "an ordinary reply")
+    assert p.flush_captures(timeout=5.0)  # would hang before the fix
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "an ordinary follow-up turn" in stored
