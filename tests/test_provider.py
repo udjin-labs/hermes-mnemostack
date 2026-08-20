@@ -55,9 +55,10 @@ def provider(monkeypatch, tmp_path):
 def _wait_threads(p: MnemostackProvider, timeout=3.0):
     deadline = time.monotonic() + timeout
     with p._lock:
-        threads = list(p._sync_threads) + list(p._prefetch_threads.values())
+        threads = list(p._prefetch_threads.values())
     for t in threads:
         t.join(timeout=max(0.0, deadline - time.monotonic()))
+    p.flush_captures(timeout=max(0.0, deadline - time.monotonic()))
 
 
 def test_unconfigured_provider_is_unavailable(monkeypatch, tmp_path):
@@ -229,9 +230,9 @@ def test_batch_failure_falls_back_to_per_item(provider):
     assert [len(c) for c in calls] == [2, 1, 1]
 
 
-def test_shutdown_drains_all_inflight_captures(provider):
-    """R1 (both reviewers, P1/P2): shutdown must join EVERY in-flight
-    capture, not only the newest thread."""
+def test_shutdown_drains_all_queued_captures(provider):
+    """R1 (both reviewers, P1/P2) reworked for the bounded queue: shutdown
+    must process EVERY queued capture before the client closes."""
     import threading as _threading
 
     p, fake = provider
@@ -250,7 +251,6 @@ def test_shutdown_drains_all_inflight_captures(provider):
     p._client = _SlowClient()
     p.sync_turn("turn one", "reply one")
     p.sync_turn("turn two", "reply two")
-    assert len(p._sync_threads) == 2
     gate.set()
     p.shutdown()
     # Both captures completed BEFORE the client closed.
@@ -324,12 +324,12 @@ def test_scope_tenant_encoding_is_injective():
 
 
 def test_sync_after_shutdown_is_a_noop(provider):
-    """R2 (agent P3): a sync_turn racing shutdown must not spawn a capture
-    against a closing client."""
+    """R2 (agent P3): a sync_turn racing shutdown must not enqueue a
+    capture against a closing client."""
     p, fake = provider
     p.shutdown()
     p.sync_turn("late turn", "late reply")
-    assert p._sync_threads == [] and fake.remembered == []
+    assert p._capture_queue.unfinished_tasks == 0 and fake.remembered == []
 
 
 def test_transport_failure_skips_pointless_per_item_retry(provider):
@@ -540,3 +540,118 @@ def test_eviction_removes_a_session_from_every_dict(provider):
         assert len(survivors) <= 2  # bound applied (+the protected sid)
         assert set(p._prefetched) <= survivors
         assert set(p._prefetch_gen) <= survivors
+
+
+# ----------------------------------------------- sessions 4-5: fencing, tools
+
+
+def test_prefetch_block_is_fenced_and_never_recaptured(provider):
+    """Task 6 (release-blocking, §5.3): the injected block carries fence
+    markers, and captured text echoing it is stripped — no recursive
+    self-capture amplification."""
+    from hermes_mnemostack.provider import FENCE_CLOSE, FENCE_OPEN
+
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="user prefers dark mode", score=0.9)]
+    p.queue_prefetch("what does the user prefer?")
+    _wait_threads(p)
+    block = p.prefetch("what does the user prefer?")
+    assert block.startswith(FENCE_OPEN) and block.endswith(FENCE_CLOSE)
+    # Round trip: the whole injected block bounces back inside a turn.
+    p.sync_turn(f"look: {block} — so?", f"per memory: {block} yes")
+    _wait_threads(p)
+    (batch,) = fake.remembered
+    for item in batch:
+        assert "dark mode" not in item.text  # fenced span stripped
+        assert FENCE_OPEN not in item.text
+    # A turn that is NOTHING BUT the echoed block captures nothing.
+    fake.remembered.clear()
+    p.sync_turn(block, block)
+    _wait_threads(p)
+    assert fake.remembered == []
+
+
+def test_system_prompt_block_mentions_fence_and_tools(provider):
+    p, _fake = provider
+    text = p.system_prompt_block()
+    assert "mnemostack_search" in text and "mnemostack_remember" in text
+    assert "mnemostack recall" in text  # fence explained to the model
+
+
+def test_tool_schemas_are_openai_shaped(provider):
+    p, _fake = provider
+    schemas = p.get_tool_schemas()
+    names = [t["name"] for t in schemas]
+    assert names == ["mnemostack_search", "mnemostack_remember", "mnemostack_forget"]
+    for t in schemas:
+        assert t["parameters"]["type"] == "object"
+        assert t["parameters"]["required"]
+
+
+def test_tools_search_remember_forget(provider):
+    import json
+
+    p, fake = provider
+    fake.hits = [RecallHit(id="m1", text="the deploy window is Friday", score=0.876)]
+    out = json.loads(p.handle_tool_call("mnemostack_search", {"query": "deploy"}))
+    assert out["ok"] and out["results"][0] == {
+        "id": "m1", "text": "the deploy window is Friday", "score": 0.876,
+    }
+    out = json.loads(
+        p.handle_tool_call(
+            "mnemostack_remember", {"text": "user timezone is UTC+3", "tags": ["tz"]}
+        )
+    )
+    assert out["ok"] and out["stored"] == 1
+    (batch,) = fake.remembered[-1:]
+    assert batch[0].source == "hermes/explicit" and batch[0].offset == 0
+    assert batch[0].tags == ["tz"]
+    out = json.loads(p.handle_tool_call("mnemostack_forget", {"id": "m1"}))
+    assert out["ok"] and out["retracted"] == 1
+
+
+def test_tool_errors_are_data_not_exceptions(provider):
+    import json
+
+    p, fake = provider
+
+    class _Boom:
+        def recall(self, *a, **k):
+            from hermes_mnemostack.client import MnemostackClientError
+
+            raise MnemostackClientError("service exploded", status_code=503)
+
+        def close(self):
+            pass
+
+    p._client = _Boom()
+    out = json.loads(p.handle_tool_call("mnemostack_search", {"query": "q"}))
+    assert out["ok"] is False and "503" not in out.get("error", "")[:0]  # message present
+    with pytest.raises(NotImplementedError):
+        p.handle_tool_call("mnemostack_unknown", {})
+
+
+def test_capture_queue_overflow_drops_loudly(provider, caplog):
+    """Task 7: a full bounded queue drops the turn with a warning instead
+    of blocking the host or growing without bound."""
+    import threading as _threading
+
+    p, fake = provider
+    gate = _threading.Event()
+
+    class _Blocked:
+        def remember(self, items):
+            gate.wait(timeout=10.0)
+            return RememberOutcome(stored=len(items), duplicates=0, failed=0)
+
+        def close(self):
+            pass
+
+    p._client = _Blocked()
+    p._capture_queue.maxsize = 2
+    with caplog.at_level("WARNING"):
+        for i in range(6):
+            p.sync_turn(f"turn {i}", f"reply {i}")
+    assert any("queue full" in r.message for r in caplog.records)
+    gate.set()
+    assert p.flush_captures(timeout=5.0)
