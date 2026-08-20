@@ -20,6 +20,8 @@ import argparse
 import json
 import os
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,7 +126,39 @@ def _config_source(hermes_home: str | None) -> str:
 # --------------------------------------------------------------- discovery
 
 
-def _discovery_check(report: Report) -> None:
+@contextmanager
+def _hermes_home(path: str | None) -> Iterator[None]:
+    """Scope hermes's own home resolution to `--hermes-home` for the block.
+
+    Discovery scans `$HERMES_HOME/plugins`, so a diagnostic pointed at one
+    home that then reports on ANOTHER home's plugin directory can print the
+    opposite verdict about the very directory being diagnosed. hermes
+    exposes a context-local override for exactly this (it deliberately does
+    not touch os.environ, which is process-wide); when a build lacks it we
+    simply do not override, rather than mutating the environment behind the
+    host's back.
+    """
+    if not path:
+        yield
+        return
+    try:
+        from hermes_constants import set_hermes_home_override
+    except Exception:  # noqa: BLE001 — older/newer layout without the hook
+        yield
+        return
+    token = set_hermes_home_override(path)
+    try:
+        yield
+    finally:
+        try:
+            from hermes_constants import _HERMES_HOME_OVERRIDE
+
+            _HERMES_HOME_OVERRIDE.reset(token)
+        except Exception:  # noqa: BLE001 — best effort; the process is a CLI
+            set_hermes_home_override(None)
+
+
+def _discovery_check(report: Report, hermes_home: str | None = None) -> None:
     """Will hermes-agent actually find this provider in this environment?
 
     Asked FUNCTIONALLY — through hermes's own discovery — instead of by
@@ -156,7 +190,8 @@ def _discovery_check(report: Report) -> None:
         )
         return
     try:
-        names = list(list_memory_provider_names())
+        with _hermes_home(hermes_home):
+            names = list(list_memory_provider_names())
     except Exception as exc:  # noqa: BLE001
         report.add("discovery", WARN, f"discovery scan failed: {type(exc).__name__}: {exc}")
         return
@@ -228,7 +263,21 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
             "check base_url, that `mnemostack serve` is running, and any proxy",
         )
         return
-    if health.status_code >= 400:
+    if 300 <= health.status_code < 400:
+        # httpx does not follow redirects by default, and the provider's own
+        # client does not either — so a base_url that redirects is a service
+        # this deployment cannot actually talk to. Reporting "reachable" for
+        # a 302 would be the worst kind of green.
+        report.add(
+            "service",
+            FAIL,
+            f"GET /health redirected ({health.status_code} → "
+            f"{health.headers.get('location', 'unknown')})",
+            "point base_url at the FINAL url — the provider's client does not "
+            "follow redirects",
+        )
+        return
+    if health.status_code >= 400 or health.status_code < 200:
         report.add("service", FAIL, f"GET /health returned {health.status_code}")
         return
     body: dict[str, Any] = {}
@@ -236,12 +285,31 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
         body = health.json()
     except Exception:  # noqa: BLE001 — a proxy's non-JSON 200
         pass
-    report.add(
-        "service",
-        OK,
-        f"{base or 'service'} reachable"
-        + (f" (mnemostack {body['version']})" if body.get("version") else ""),
-    )
+    if not isinstance(body, dict) or "status" not in body:
+        # A 200 from something that is not mnemostack (a proxy's login page,
+        # an SPA index) must not read as a healthy memory service.
+        report.add(
+            "service",
+            FAIL,
+            f"{base or 'service'} answered /health, but not with a mnemostack "
+            "health document",
+            "check base_url — something else is serving this path",
+        )
+        return
+    version = f" (mnemostack {body['version']})" if body.get("version") else ""
+    if body.get("status") != "ok":
+        # The service is up but reports a dependency down (Qdrant is the
+        # hard one). Recall may still answer; it will answer badly.
+        report.add(
+            "service",
+            WARN,
+            f"{base or 'service'} reachable but reports status="
+            f"{body.get('status')!r}{version}"
+            + (" — qdrant unreachable" if body.get("qdrant") is False else ""),
+            "check the service's own /health and its backing stores",
+        )
+    else:
+        report.add("service", OK, f"{base or 'service'} reachable{version}")
     # Read-scope probe. Deliberately no write probe: a doctor run must not
     # create memories, and a rejected write would be indistinguishable from
     # a quota rejection anyway.
@@ -276,14 +344,20 @@ def _report_recall_status(report: Report, resp: Any, *, authed: bool) -> None:
             "reissue with `mnemostack keys add --scopes read,write`",
         )
         return
-    if resp.status_code >= 400:
+    if not 200 <= resp.status_code < 300:
+        # 3xx included: an unfollowed redirect proves nothing about the read
+        # scope, and treating it as anything but a failure would let doctor
+        # exit 0 having confirmed nothing.
         report.add("recall", FAIL, f"probe recall returned {resp.status_code}")
         return
     data = {}
     try:
         data = resp.json()
     except Exception:  # noqa: BLE001
-        report.add("recall", WARN, "probe recall returned a non-JSON body")
+        report.add("recall", FAIL, "probe recall returned a non-JSON body")
+        return
+    if not isinstance(data, dict) or "results" not in data:
+        report.add("recall", FAIL, "probe recall returned an unexpected document")
         return
     hits = len(data.get("results", []))
     report.add(
@@ -315,6 +389,17 @@ def _report_degradation(report: Report, degraded: list[Any], notes: list[Any]) -
             OK,
             "no faults" + (f" (routine notes: {', '.join(str(n) for n in notes)})" if notes else ""),
         )
+
+
+def _collection_dimension(store: Any, collection: str) -> int | None:
+    """The existing collection's dense vector size, or None if it cannot be
+    read (a custom store, a named-vectors config with no single size, an
+    unreachable call). Read-only — never creates anything."""
+    try:
+        info = store.client.get_collection(collection)
+        return getattr(getattr(info.config.params, "vectors", None), "size", None)
+    except Exception:  # noqa: BLE001 — best effort; absence is not a failure
+        return None
 
 
 def _probe_local(report: Report, cfg: dict[str, Any]) -> None:
@@ -361,6 +446,22 @@ def _probe_local(report: Report, cfg: dict[str, Any]) -> None:
         )
         return
     if exists:
+        # An existing collection built with ANOTHER embedding model has a
+        # different vector size, and the provider's first session dies on it
+        # (ensure_collection raises DimensionMismatchError). Reading the
+        # size is the whole point of a diagnostic — reporting "exists, ok"
+        # and letting initialize() discover it is a false green.
+        size = _collection_dimension(store, cfg["collection"])
+        if size is not None and int(size) != int(provider.dimension):
+            report.add(
+                "qdrant",
+                FAIL,
+                f"collection {cfg['collection']!r} stores {size}-dim vectors but "
+                f"{cfg['embedding_provider']} produces {provider.dimension}-dim",
+                "point `collection` at a collection built with this embedding "
+                "model, or re-index into a new one",
+            )
+            return
         try:
             points = store.count()
         except Exception:  # noqa: BLE001 — reachable but the count failed
@@ -417,7 +518,7 @@ def cmd_doctor(args: argparse.Namespace, *, http: Any | None = None) -> int:
         OK if problem is None else FAIL,
         "hermes would activate this provider" if problem is None else problem,
     )
-    _discovery_check(report)
+    _discovery_check(report, args.hermes_home)
     # Probe regardless of the availability verdict: "unavailable AND the
     # service is down" is two remedies, and reporting only the first sends
     # the operator back for a second round.
@@ -433,24 +534,53 @@ def cmd_doctor(args: argparse.Namespace, *, http: Any | None = None) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
+    # The shared options are registered on the root parser AND on every
+    # subcommand: argparse otherwise rejects `doctor --json` (options bind to
+    # the parser they were declared on), which is exactly how anyone types it
+    # and exactly what the README documents.
+    # SUPPRESS, not a real default: a subparser writes its defaults into the
+    # SAME namespace, so a plain default would let `--hermes-home X status`
+    # be silently reset to None by the subcommand. With SUPPRESS an unset
+    # option contributes nothing, and main() fills the defaults once.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--hermes-home",
+        default=argparse.SUPPRESS,
+        help="Hermes home directory (default: hermes-agent's own resolution)",
+    )
+    common.add_argument(
+        "--json",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Machine-readable output",
+    )
     parser = argparse.ArgumentParser(
         prog="hermes-mnemostack",
         description="Inspect and diagnose the mnemostack memory provider for hermes-agent.",
+        parents=[common],
     )
-    parser.add_argument(
-        "--hermes-home",
-        default=None,
-        help="Hermes home directory (default: hermes-agent's own resolution)",
-    )
-    parser.add_argument("--json", action="store_true", help="Machine-readable output")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("status", help="Show the effective configuration (no network)")
-    sub.add_parser("doctor", help="Probe the configured transport and report remedies")
+    sub.add_parser(
+        "status", parents=[common], help="Show the effective configuration (no network)"
+    )
+    sub.add_parser(
+        "doctor",
+        parents=[common],
+        help="Probe the configured transport and report remedies",
+    )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse, then fill the suppressed shared defaults exactly once."""
     args = build_parser().parse_args(argv)
+    args.hermes_home = getattr(args, "hermes_home", None)
+    args.json = getattr(args, "json", False)
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     if args.command == "status":
         return cmd_status(args)
     return cmd_doctor(args)

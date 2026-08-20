@@ -21,7 +21,7 @@ def _args(command: str, hermes_home, *, as_json: bool = False):
     argv = ["--hermes-home", str(hermes_home)]
     if as_json:
         argv.append("--json")
-    return cli.build_parser().parse_args([*argv, command])
+    return cli.parse_args([*argv, command])
 
 
 def _write_config(home, **values):
@@ -273,3 +273,157 @@ def test_main_dispatches_and_requires_a_command(tmp_path, capsys):  # status: no
     assert cli.main(["--hermes-home", str(tmp_path), "status"]) == 0
     with pytest.raises(SystemExit):
         cli.main(["--hermes-home", str(tmp_path)])
+
+
+# --------------------------------------------- round-1 (codex) regressions
+
+
+def test_shared_options_parse_after_the_subcommand(tmp_path):
+    """R1 (codex P2): `--json`/`--hermes-home` were registered only on the
+    root parser, so the README's own `doctor --json` exited with
+    'unrecognized arguments'."""
+    args = cli.parse_args(["doctor", "--json", "--hermes-home", str(tmp_path)])
+    assert args.command == "doctor" and args.json is True
+    assert args.hermes_home == str(tmp_path)
+    # ...and the root position still works, without the subparser's own
+    # defaults clobbering it (the argparse trap this fix has to avoid).
+    args = cli.parse_args(["--hermes-home", str(tmp_path), "--json", "status"])
+    assert args.hermes_home == str(tmp_path) and args.json is True
+    args = cli.parse_args(["status"])
+    assert args.hermes_home is None and args.json is False
+
+
+def test_discovery_scan_uses_the_requested_hermes_home(tmp_path, monkeypatch):
+    """R1 (codex P2): discovery scans $HERMES_HOME/plugins, so a doctor run
+    pointed at one home that scanned ANOTHER could print the opposite
+    verdict about the very directory being diagnosed."""
+    pytest.importorskip("hermes_constants")
+    import hermes_constants
+
+    seen: list[str | None] = []
+
+    def _names():
+        seen.append(hermes_constants.get_hermes_home_override())
+        return []
+
+    monkeypatch.setattr("plugins.memory.list_memory_provider_names", _names)
+    report = cli.Report()
+    cli._discovery_check(report, str(tmp_path))
+    assert seen == [str(tmp_path)]
+    # And the override does not leak past the scan.
+    assert hermes_constants.get_hermes_home_override() is None
+
+
+def test_doctor_fails_on_a_redirecting_service(tmp_path, capsys):
+    """R1 (codex P2): neither this client nor the provider's follows
+    redirects, so a 302 from a proxy is a service we cannot talk to —
+    reporting it 'reachable' would be the worst kind of green."""
+
+    class _Resp:
+        status_code = 302
+        headers = {"location": "https://elsewhere.invalid/health"}
+
+        def json(self):  # pragma: no cover — must not be reached
+            raise AssertionError("a redirect has no health document")
+
+    class _Http:
+        def get(self, _path):
+            return _Resp()
+
+        def post(self, *_a, **_k):  # pragma: no cover — probe stops earlier
+            raise AssertionError("must not probe recall after a failed health")
+
+    _write_config(tmp_path, mode="remote", base_url="http://proxy.invalid")
+    rc = cli.cmd_doctor(_args("doctor", tmp_path), http=_Http())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "redirected" in out and "elsewhere.invalid" in out
+
+
+def test_doctor_fails_when_something_else_serves_health(tmp_path, capsys):
+    """A 200 from a proxy's login page is not a healthy memory service."""
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"login": "please"}
+
+    class _Http:
+        def get(self, _path):
+            return _Resp()
+
+        def post(self, *_a, **_k):  # pragma: no cover
+            raise AssertionError("must not probe recall after a failed health")
+
+    _write_config(tmp_path, mode="remote", base_url="http://proxy.invalid")
+    assert cli.cmd_doctor(_args("doctor", tmp_path), http=_Http()) == 1
+    assert "not with a mnemostack" in capsys.readouterr().out
+
+
+def test_doctor_reports_a_degraded_service_without_claiming_health(tmp_path, capsys):
+    class _Health:
+        status_code = 200
+
+        def json(self):
+            return {"status": "degraded", "version": "2.2.0", "qdrant": False}
+
+    class _Recall:
+        status_code = 200
+
+        def json(self):
+            return {"results": [], "degraded": [], "notes": []}
+
+    class _Http:
+        def get(self, _path):
+            return _Health()
+
+        def post(self, *_a, **_k):
+            return _Recall()
+
+    _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
+    cli.cmd_doctor(_args("doctor", tmp_path), http=_Http())
+    out = capsys.readouterr().out
+    assert "status='degraded'" in out and "qdrant unreachable" in out
+
+
+def test_doctor_catches_a_collection_built_with_another_model(tmp_path, capsys, monkeypatch):
+    """R1 (codex P2): an existing collection whose vector size belongs to a
+    different embedding model kills the provider's first session
+    (ensure_collection raises). Reporting 'exists, ok' is a false green."""
+
+    class _Info:
+        class config:
+            class params:
+                class vectors:
+                    size = 1024
+
+    class _Client:
+        def get_collection(self, _name):
+            return _Info()
+
+    class _Store:
+        client = _Client()
+
+        def __init__(self, **kw):
+            pass
+
+        def collection_exists(self):
+            return True
+
+        def count(self):  # pragma: no cover — must not be reached
+            raise AssertionError("no count after a dimension mismatch")
+
+    class _Provider:
+        dimension = 3
+
+        def health_check(self):
+            return True, "ok"
+
+    monkeypatch.setattr("mnemostack.vector.VectorStore", _Store)
+    monkeypatch.setattr("mnemostack.embeddings.get_provider", lambda _n, **_k: _Provider())
+    _write_config(tmp_path, mode="local", collection="wrong-model")
+    rc = cli.cmd_doctor(_args("doctor", tmp_path))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "1024-dim" in out and "3-dim" in out
