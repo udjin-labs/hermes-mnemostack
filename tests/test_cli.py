@@ -666,3 +666,23 @@ def test_an_unbounded_field_cannot_flood_the_report(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert max(len(line) for line in out.splitlines()) < 500
+
+
+def test_no_line_breaking_character_survives_a_row():
+    """R9 (codex P1): the sanitizer's class was C0+C1 only, but
+    str.splitlines() — and the renderers a pasted report travels through —
+    also break on U+2028/U+2029, so a supplied glyph after one still began
+    a convincing extra row. Derived from splitlines itself rather than
+    hand-listed, so the pin cannot drift from the behaviour it guards."""
+    breakers = [c for c in map(chr, range(0x3000)) if len(f"a{c}b".splitlines()) > 1]
+    assert " " in breakers and " " in breakers  # the sanity of the probe
+    for ch in breakers:
+        row = cli._row_text(f"2.2.0){ch}✓ FORGED  fine (")
+        assert len(row.splitlines()) == 1, (hex(ord(ch)), row)
+
+
+def test_bidi_and_zero_width_characters_cannot_reshape_a_row():
+    """They cannot start a row, but they can reorder or hide what one
+    says — which is the same lie by a different route."""
+    for ch in ("‮", "⁦", "​", "﻿"):
+        assert ch not in cli._row_text(f"ok{ch}text")

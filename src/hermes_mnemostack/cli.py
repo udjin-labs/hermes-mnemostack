@@ -51,7 +51,14 @@ class Check:
 #: extra line that looks exactly like a genuine passing check in the
 #: output an operator reads — or pastes into a support thread — to decide
 #: whether their deployment is healthy.
-_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+#: The class is NOT "C0 and C1": Python's own str.splitlines() breaks on
+#: U+2028/U+2029 as well, and so do many renderers that a pasted report
+#: passes through. Bidi overrides and zero-width characters are in here
+#: for the same reason one step further on — they cannot start a new row,
+#: but they can reorder or hide what a row says.
+_CONTROL_RE = re.compile(
+    r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
+)
 #: And a row is a row, not a document: an unbounded field would flood the
 #: report even without a newline in it.
 _ROW_MAX_CHARS = 300
