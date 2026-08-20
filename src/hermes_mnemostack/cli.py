@@ -267,9 +267,21 @@ def _safe_location(location: str | None) -> str:
 
         parts = urlsplit(location)
         host = parts.hostname or ""
+        if ":" in host:
+            # urlsplit strips an IPv6 literal's brackets; without them back
+            # the host runs into the port and the destination we print is
+            # ambiguous rather than merely redacted.
+            host = f"[{host}]"
         if parts.port:
             host = f"{host}:{parts.port}"
-        shown = f"{parts.scheme}://{host}{parts.path}" if host else parts.path
+        if not host:
+            shown = parts.path
+        elif parts.scheme:
+            shown = f"{parts.scheme}://{host}{parts.path}"
+        else:
+            # A scheme-relative Location ("//host/path") is valid; emitting
+            # "://host/path" for it would be a URL nobody can follow.
+            shown = f"//{host}{parts.path}"
         if parts.query or parts.fragment or parts.username or parts.password:
             shown += " (query/credentials redacted)"
         return shown or "unknown"

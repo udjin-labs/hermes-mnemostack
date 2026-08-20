@@ -461,3 +461,22 @@ def test_a_redirect_location_is_printed_without_its_secrets(tmp_path, capsys):
     assert "SECRET-abc123" not in out
     assert "user:pw" not in out and "frag" not in out
     assert "sso.invalid/authorize" in out  # the useful half survives
+
+
+def test_redacted_locations_stay_valid_urls():
+    """R3 (codex P2): redaction must not corrupt the destination. A
+    scheme-relative Location is valid and must not become '://host/path';
+    an IPv6 literal loses its brackets to urlsplit and must get them back,
+    or host and port run together into an ambiguous address."""
+    assert (
+        cli._safe_location("//sso.invalid/login?token=x")
+        == "//sso.invalid/login (query/credentials redacted)"
+    )
+    assert (
+        cli._safe_location("https://[2001:db8::1]:8443/authorize?t=x")
+        == "https://[2001:db8::1]:8443/authorize (query/credentials redacted)"
+    )
+    assert cli._safe_location("https://plain.invalid/x") == "https://plain.invalid/x"
+    assert cli._safe_location("/relative/path") == "/relative/path"
+    assert cli._safe_location(None) == "unknown"
+    assert cli._safe_location("") == "unknown"
