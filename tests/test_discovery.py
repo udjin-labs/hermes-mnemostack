@@ -24,24 +24,47 @@ def test_entry_point_registered():
     assert ep.value == "hermes_mnemostack.provider:MnemostackProvider"
 
 
-def test_entry_point_loads_an_abc_compliant_class():
+def test_entry_point_loads_an_abc_compliant_class(monkeypatch, tmp_path):
     """hermes-agent's loader accepts a MemoryProvider subclass constructible
     with zero args — pin exactly that shape."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("MNEMOSTACK_MODE", raising=False)
     loaded = _our_entry_point().load()
     assert isinstance(loaded, type) and issubclass(loaded, MemoryProvider)
     provider = loaded()
     assert provider.name == "mnemostack"
-    # Contract: is_available makes no network calls; skeleton is honest
-    # about being unconfigured and says why.
+    # Contract: is_available makes no network calls; an unconfigured
+    # provider is honestly unavailable and says why.
     assert provider.is_available() is False
     assert provider.unavailable_reason()
 
 
-def test_lifecycle_skeleton_is_callable():
-    from hermes_mnemostack.provider import MnemostackProvider
+def test_lifecycle_is_callable(monkeypatch, tmp_path):
+    import hermes_mnemostack.provider as pmod
 
-    p = MnemostackProvider()
-    p.initialize("sess-1", hermes_home="/tmp/hh", platform="cli")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "mnemostack.json").write_text("{}")
+
+    class _NullClient:
+        def recall(self, query, *, limit=5, filters=None):
+            return []
+
+        def remember(self, items):
+            raise AssertionError("no capture expected in this test")
+
+        def invalidate(self, ids):
+            return 0
+
+        def forget(self, ids):
+            return 0
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(pmod, "build_client", lambda cfg, scope=None: _NullClient())
+    p = pmod.MnemostackProvider()
+    assert p.is_available() is True
+    p.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
     assert p.get_tool_schemas() == []
     assert p.system_prompt_block() == ""
     assert p.prefetch("query") == ""
