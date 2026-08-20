@@ -21,6 +21,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -51,14 +52,21 @@ class Check:
 #: extra line that looks exactly like a genuine passing check in the
 #: output an operator reads — or pastes into a support thread — to decide
 #: whether their deployment is healthy.
-#: The class is NOT "C0 and C1": Python's own str.splitlines() breaks on
-#: U+2028/U+2029 as well, and so do many renderers that a pasted report
-#: passes through. Bidi overrides and zero-width characters are in here
-#: for the same reason one step further on — they cannot start a new row,
-#: but they can reorder or hide what a row says.
-_CONTROL_RE = re.compile(
-    r"[\x00-\x1f\x7f-\x9f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]"
-)
+#: Categories, not a hand-listed set of characters. Every earlier attempt
+#: here was a list somebody remembered to write, and each one was missing
+#: its next member (U+2028 after C0/C1, then U+061C after that). Unicode
+#: already classifies exactly what must not reach a report row:
+#:   Cc  control characters — a newline forges a whole extra row, because
+#:       the renderer prints one line per check;
+#:   Zl/Zp  line and paragraph separators — str.splitlines() breaks on
+#:       them too, and so do the renderers a pasted report passes through;
+#:   Cf  format characters — bidi overrides, isolates, the Arabic letter
+#:       mark, zero-width joiners and the BOM. They cannot start a row,
+#:       but they reorder or hide what one says, which is the same lie.
+#: Ordinary text of any script is untouched; an emoji ZWJ sequence in a
+#: version string is the one thing this flattens, which a diagnostic row
+#: can live with.
+_STRIPPED_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 #: And a row is a row, not a document: an unbounded field would flood the
 #: report even without a newline in it.
 _ROW_MAX_CHARS = 300
@@ -72,7 +80,10 @@ def _row_text(value: Any) -> str:
     degradation tag — cannot forge structure no matter which call site it
     travelled through.
     """
-    cleaned = _CONTROL_RE.sub(" ", str(value))
+    cleaned = "".join(
+        " " if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch
+        for ch in str(value)
+    )
     if len(cleaned) > _ROW_MAX_CHARS:
         cleaned = cleaned[: _ROW_MAX_CHARS - 1] + "\u2026"
     return cleaned

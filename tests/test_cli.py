@@ -681,8 +681,23 @@ def test_no_line_breaking_character_survives_a_row():
         assert len(row.splitlines()) == 1, (hex(ord(ch)), row)
 
 
-def test_bidi_and_zero_width_characters_cannot_reshape_a_row():
-    """They cannot start a row, but they can reorder or hide what one
-    says — which is the same lie by a different route."""
-    for ch in ("‮", "⁦", "​", "﻿"):
-        assert ch not in cli._row_text(f"ok{ch}text")
+def test_no_invisible_control_survives_a_row():
+    """R10 (codex P2): the hand-listed bidi set was missing U+061C, just as
+    the hand-listed break set had been missing U+2028. It is derived from
+    Unicode's own categories now, and pinned the same way — every Cc/Cf/
+    Zl/Zp character is stripped, so the next one nobody thought of is
+    covered without anyone thinking of it."""
+    import unicodedata
+
+    suspects = [
+        ch
+        for ch in map(chr, range(0x110000))
+        if unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp")
+    ]
+    assert "\u061c" in suspects and "\u2028" in suspects and "\n" in suspects
+    for ch in suspects:
+        assert ch not in cli._row_text(f"ok{ch}text"), hex(ord(ch))
+    # Ordinary text of any script is untouched.
+    assert cli._row_text("\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587") == (
+        "\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587"
+    )
