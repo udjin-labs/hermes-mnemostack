@@ -382,8 +382,12 @@ def test_doctor_reports_a_degraded_service_without_claiming_health(tmp_path, cap
             return _Recall()
 
     _write_config(tmp_path, mode="remote", base_url="http://svc.invalid")
-    cli.cmd_doctor(_args("doctor", tmp_path), http=_Http())
+    # R2 (codex P1): mnemostack reports `degraded` exactly when Qdrant is
+    # unreachable, and recall stays fail-soft — so a WARN here let doctor
+    # exit 0 while memory was not working.
+    rc = cli.cmd_doctor(_args("doctor", tmp_path), http=_Http())
     out = capsys.readouterr().out
+    assert rc == 1
     assert "status='degraded'" in out and "qdrant unreachable" in out
 
 
@@ -427,3 +431,33 @@ def test_doctor_catches_a_collection_built_with_another_model(tmp_path, capsys, 
     out = capsys.readouterr().out
     assert rc == 1
     assert "1024-dim" in out and "3-dim" in out
+
+
+def test_a_redirect_location_is_printed_without_its_secrets(tmp_path, capsys):
+    """R2 (codex P2): an SSO/proxy redirect routinely carries a token in the
+    query string, and these reports get pasted into support threads. The
+    operator's question is WHERE base_url sent them — nothing else."""
+
+    class _Resp:
+        status_code = 307
+        headers = {
+            "location": "https://user:pw@sso.invalid/authorize?access_token=SECRET-abc123#frag"
+        }
+
+        def json(self):  # pragma: no cover
+            raise AssertionError("a redirect has no health document")
+
+    class _Http:
+        def get(self, _path):
+            return _Resp()
+
+        def post(self, *_a, **_k):  # pragma: no cover
+            raise AssertionError("must not probe recall after a failed health")
+
+    _write_config(tmp_path, mode="remote", base_url="http://proxy.invalid")
+    assert cli.cmd_doctor(_args("doctor", tmp_path), http=_Http()) == 1
+    assert cli.cmd_doctor(_args("doctor", tmp_path, as_json=True), http=_Http()) == 1
+    out = capsys.readouterr().out
+    assert "SECRET-abc123" not in out
+    assert "user:pw" not in out and "frag" not in out
+    assert "sso.invalid/authorize" in out  # the useful half survives

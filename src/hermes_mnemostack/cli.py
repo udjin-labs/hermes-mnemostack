@@ -251,6 +251,32 @@ def _probe_remote(report: Report, cfg: dict[str, Any], http: Any | None = None) 
         client.close()
 
 
+def _safe_location(location: str | None) -> str:
+    """Where a redirect points, with the parts that carry secrets removed.
+
+    An SSO/proxy redirect routinely carries a token in the query string
+    (and sometimes credentials in the userinfo), and these reports get
+    pasted into support threads. Scheme, host and path answer the
+    operator's question — "where did my base_url send me" — so nothing
+    else is printed.
+    """
+    if not location:
+        return "unknown"
+    try:
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(location)
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        shown = f"{parts.scheme}://{host}{parts.path}" if host else parts.path
+        if parts.query or parts.fragment or parts.username or parts.password:
+            shown += " (query/credentials redacted)"
+        return shown or "unknown"
+    except Exception:  # noqa: BLE001 — a malformed Location must not leak or crash
+        return "unparseable (redacted)"
+
+
 def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
     base = cfg["base_url"]
     try:
@@ -272,7 +298,7 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
             "service",
             FAIL,
             f"GET /health redirected ({health.status_code} → "
-            f"{health.headers.get('location', 'unknown')})",
+            f"{_safe_location(health.headers.get('location'))})",
             "point base_url at the FINAL url — the provider's client does not "
             "follow redirects",
         )
@@ -298,11 +324,14 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
         return
     version = f" (mnemostack {body['version']})" if body.get("version") else ""
     if body.get("status") != "ok":
-        # The service is up but reports a dependency down (Qdrant is the
-        # hard one). Recall may still answer; it will answer badly.
+        # FAIL, not WARN: mnemostack reports `degraded` exactly when Qdrant
+        # — its hard dependency — is unreachable. Recall is fail-soft and
+        # can still answer 200 with nothing in it, so a WARN here let
+        # `doctor` exit 0 and `--json` say "ok" while memory was, in fact,
+        # not working. A diagnostic's whole job is to not do that.
         report.add(
             "service",
-            WARN,
+            FAIL,
             f"{base or 'service'} reachable but reports status="
             f"{body.get('status')!r}{version}"
             + (" — qdrant unreachable" if body.get("qdrant") is False else ""),
