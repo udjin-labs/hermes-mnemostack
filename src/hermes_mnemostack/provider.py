@@ -76,39 +76,44 @@ _INJECTED_MEMORY_MAX = 128
 _BLOCK_BULLET = "-"
 
 
-def _absorb_block_bullets(content: str, mask: bytearray) -> None:
-    """Mask the line prefix that introduces a recalled memory.
+def _framing_prefix_start(content: str, i: int) -> int | None:
+    """Index where the line's framing prefix before ``i`` begins.
 
-    That prefix is the bullet this provider renders, plus any quote
-    markers the caller wrapped the echo in ("> - recalled text") — all of
-    it is framing around OUR content, none of it is their words. A dash
-    with real text before it on the line is the caller's (arithmetic,
-    their own list) and is left alone even in a turn that echoes a block.
-    Mutates ``mask`` in place.
+    Framing is whitespace, quote markers, and at most one bullet — the
+    shape this provider renders around a recalled memory, plus the
+    quoting a caller may wrap it in. Returns None when real text precedes
+    on that line (then the dash, if any, is the caller's own).
+    """
+    k = i - 1
+    seen_bullet = False
+    while k >= 0:
+        ch = content[k]
+        if ch in " \t\r>":
+            k -= 1
+            continue
+        if ch == _BLOCK_BULLET and not seen_bullet:
+            seen_bullet = True
+            k -= 1
+            continue
+        break
+    if k >= 0 and content[k] != "\n":
+        return None
+    return k + 1
+
+
+def _absorb_block_bullets(content: str, mask: bytearray) -> None:
+    """Mask the framing prefix that introduces each recalled memory.
+
+    Mutates ``mask`` in place. Absorption only extends a run BACKWARD
+    into already-visited indices, so it cannot cascade.
     """
     for i, masked in enumerate(mask):
         if not masked or (i and mask[i - 1]):
             continue  # only the START of a masked run matters
-        # Walk back over framing only: whitespace, quote markers, and at
-        # most one bullet. Reaching the line start means everything
-        # between it and the span is framing around OUR content.
-        k = i - 1
-        seen_bullet = False
-        while k >= 0:
-            ch = content[k]
-            if ch in " \t\r>":
-                k -= 1
-                continue
-            if ch == _BLOCK_BULLET and not seen_bullet:
-                seen_bullet = True
-                k -= 1
-                continue
-            break
-        if k >= 0 and content[k] != "\n":
-            continue  # real text precedes on this line — the caller's
-        if k + 1 == i:
-            continue  # nothing to absorb
-        for t in range(k + 1, i):
+        begin = _framing_prefix_start(content, i)
+        if begin is None or begin == i:
+            continue
+        for t in range(begin, i):
             mask[t] = 1
 
 
@@ -610,6 +615,12 @@ class MnemostackProvider(MemoryProvider):
                         break
                     for j in range(i, i + len(text)):
                         probe[j] = 1
+                    # A short memory sitting on a framing-prefixed line of
+                    # an ECHOED block is not a coincidental word overlap —
+                    # it is our own rendering, so it is really removed.
+                    if fence_echoed and _framing_prefix_start(content, i) is not None:
+                        for j in range(i, i + len(text)):
+                            mask[j] = 1
                     start_at = i + len(text)
             # Coverage alone decides: with nothing masked, a non-empty
             # turn can never be fully covered, so no "did anything match"

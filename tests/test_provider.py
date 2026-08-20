@@ -1183,3 +1183,58 @@ def test_quoted_block_echo_drops_our_bullets(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert "noted for later" in stored  # exactly the caller's words
     assert not any("recalled fact" in t for t in stored)
+
+
+def test_mixed_length_block_echo_leaves_no_short_memory(provider):
+    """R12 (agent P2): short spans only entered the probe, so a block
+    echo mixing a long and a SHORT memory plus the caller's own words
+    re-stored the short memory's text verbatim."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="the staging cluster lives in eu-central-1", score=0.9),
+        RecallHit(id="2", text="see PR #157", score=0.8),  # short span
+    ]
+    p.queue_prefetch("where is staging?")
+    _wait_threads(p)
+    block = p.prefetch("where is staging?")
+    fake.remembered.clear()
+    p.sync_turn(f"{block}\n\nnoted for later", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "noted for later" in stored  # exactly the caller's words
+    assert not any("PR #157" in t or "eu-central-1" in t for t in stored)
+
+
+def test_short_memory_outside_a_block_is_still_coincidence_safe(provider):
+    """The short-span rule stays narrow: without an echoed block, a short
+    recalled phrase inside the caller's own sentence is NOT cut."""
+    p, fake = provider
+    fake.hits = [RecallHit(id="1", text="see PR #157", score=0.9)]
+    p.queue_prefetch("which PR was that?")
+    _wait_threads(p)
+    p.prefetch("which PR was that?")
+    fake.remembered.clear()
+    p.sync_turn("I will see PR #157 tomorrow and report back", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "I will see PR #157 tomorrow and report back" in stored
+
+
+def test_short_memory_in_own_sentence_survives_a_block_echo_turn(provider):
+    """R12 sharpening: inside a turn that echoes a block, only occurrences
+    on the block's own framing-prefixed lines are ours. The same phrase
+    written into the caller's sentence is theirs and must survive."""
+    p, fake = provider
+    fake.hits = [
+        RecallHit(id="1", text="the staging cluster lives in eu-central-1", score=0.9),
+        RecallHit(id="2", text="see PR #157", score=0.8),
+    ]
+    p.queue_prefetch("where is staging?")
+    _wait_threads(p)
+    block = p.prefetch("where is staging?")
+    fake.remembered.clear()
+    p.sync_turn(f"{block}\n\nI will see PR #157 tomorrow", "ack")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert "I will see PR #157 tomorrow" in stored  # caller's own sentence
+    assert not any("eu-central-1" in t for t in stored)  # block content gone
