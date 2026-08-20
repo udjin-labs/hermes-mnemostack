@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-mnemostack"
+version = "0.1.0.dev0"
+description = "mnemostack memory provider for hermes-agent: hybrid semantic/BM25/temporal/graph recall as the agent's persistent memory"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "hermes-mnemostack contributors" }]
+keywords = ["hermes-agent", "mnemostack", "memory", "agent", "rag", "recall"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+# hermes-agent is a true runtime dependency: the provider subclasses its
+# MemoryProvider ABC at import time. hermes-agent caps python at <3.14,
+# which pip resolves transitively — no need to repeat the cap here.
+# Floor note: 0.19 (latest on PyPI) carries the ABC but NOT the pip
+# entry-point discovery (landed in 0.20, git-only for now) — on 0.19 the
+# provider installs as a $HERMES_HOME/plugins/ directory instead.
+dependencies = [
+    "hermes-agent>=0.19",
+    "mnemostack>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "ruff>=0.1",
+    "mypy>=1.7",
+]
+
+[project.entry-points."hermes_agent.memory_providers"]
+mnemostack = "hermes_mnemostack.provider:MnemostackProvider"
+
+[project.urls]
+Homepage = "https://github.com/udjin-labs/hermes-mnemostack"
+Repository = "https://github.com/udjin-labs/hermes-mnemostack"
+Issues = "https://github.com/udjin-labs/hermes-mnemostack/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+no_implicit_optional = true
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
