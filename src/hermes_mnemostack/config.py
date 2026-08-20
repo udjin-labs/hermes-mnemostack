@@ -12,7 +12,13 @@ Two transports behind one ``mode`` switch:
   tenant is resolved server-side from the service key. Requires
   mnemostack >= 2.2 on the SERVER (the remote write/lifecycle surface).
 - ``local`` — mnemostack as a library against your own Qdrant; profile
-  isolation is metadata-scoped (same machine, same trust domain).
+  isolation is tenant-scoped through the library (same machine, same
+  trust domain).
+
+Not shipped yet (deliberately absent rather than a silent no-op knob):
+capture of tool calls/results, which needs its own redaction policy —
+tool output routinely carries paths, tokens and private workspace
+contents.
 """
 
 from __future__ import annotations
@@ -43,7 +49,6 @@ _DEFAULTS: dict[str, Any] = {
     # behavior
     "recall_limit": 5,
     "capture": True,          # store user+assistant turns
-    "capture_tools": False,   # tool calls/results are opt-in (risk: paths, creds)
 }
 
 _ENV_MAP = {
@@ -56,10 +61,9 @@ _ENV_MAP = {
     "embedding_model": "MNEMOSTACK_EMBEDDING_MODEL",
     "recall_limit": "MNEMOSTACK_RECALL_LIMIT",
     "capture": "MNEMOSTACK_CAPTURE",
-    "capture_tools": "MNEMOSTACK_CAPTURE_TOOLS",
 }
 
-_BOOL_KEYS = {"capture", "capture_tools"}
+_BOOL_KEYS = {"capture"}
 _FLOAT_KEYS = {"timeout"}
 _INT_KEYS = {"recall_limit"}
 

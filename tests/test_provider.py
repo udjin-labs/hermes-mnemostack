@@ -1263,3 +1263,23 @@ def test_short_memory_on_its_own_line_outside_the_block_survives(provider):
     stored = [i.text for b in fake.remembered for i in b]
     assert "see PR #157 tomorrow" in stored  # caller's own line, intact
     assert not any("eu-central-1" in t for t in stored)
+
+
+def test_tool_provenance_follows_the_calling_session(provider):
+    """Final review (agent P2): hosts serving concurrent sessions forward
+    session_id to handle_tool_call — provenance must land on the session
+    that saw the result, not on whichever touched the provider last."""
+    p, fake = provider
+    fact = "the incident postmortem doc lives in the ops wiki"
+    fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
+    p.handle_tool_call(
+        "mnemostack_search", {"query": "where is the postmortem?"}, session_id="A"
+    )
+    with p._lock:
+        assert fact in p._recently_injected.get("A", {})
+        assert "B" not in p._recently_injected
+    # B echoing the same text is NOT suppressed — it never saw it.
+    p.sync_turn(fact, "noted", session_id="B")
+    _wait_threads(p)
+    stored = [i.text for b in fake.remembered for i in b]
+    assert any("ops wiki" in t for t in stored)

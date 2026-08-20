@@ -366,6 +366,10 @@ class MnemostackProvider(MemoryProvider):
     def handle_tool_call(self, tool_name: str, args: dict[str, Any], **kwargs: Any) -> str:
         import json
 
+        # The ABC forwards **kwargs; hosts serving concurrent sessions pass
+        # session_id here, and provenance must land on the session that
+        # actually saw the result (not the last one to touch the provider).
+        session_key = self._session_key(str(kwargs.get("session_id", "") or ""))
         client = self._client
         if client is None:
             return json.dumps({"ok": False, "error": "provider not initialized"})
@@ -387,7 +391,7 @@ class MnemostackProvider(MemoryProvider):
                 if shown:
                     with self._lock:
                         self._note_injected_locked(
-                            self._session_key(), tuple(t for _h, t in shown)
+                            session_key, tuple(t for _h, t in shown)
                         )
                 return json.dumps(
                     {

@@ -3,7 +3,8 @@
 The provider only ever talks to :class:`MnemoStackClient`; whether that is
 a remote mnemostack service or an in-process mnemostack library stack is a
 configuration detail. Both cover the full lifecycle: recall, remember,
-invalidate (soft retraction), forget (hard delete).
+invalidate (soft retraction), forget (hard delete — a client-API
+capability; the model-facing tool exposes retraction only).
 
 Isolation models differ by design and are documented per client:
 

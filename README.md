@@ -1,16 +1,23 @@
 # hermes-mnemostack
 
-**Status: pre-alpha — skeleton only, not yet usable.**
+**Status: pre-alpha.** The provider is wired end to end (recall injection, turn capture, tools, configuration) and covered by tests, but it has not been run against a live hermes-agent session yet and the entry-point discovery it relies on needs hermes-agent >= 0.20 (see below).
 
 [mnemostack](https://github.com/udjin-labs/mnemostack) memory provider for
-[hermes-agent](https://github.com/NousResearch/hermes-agent): hybrid
-semantic + BM25 + temporal + graph recall as the agent's persistent memory,
-over either transport:
+[hermes-agent](https://github.com/NousResearch/hermes-agent): persistent
+agent memory over either transport:
 
-- **local SDK** — mnemostack as a library against your own Qdrant/Memgraph;
-- **remote HTTP** — a shared multi-tenant mnemostack service (the tenant is
-  resolved from the service key), full read+write lifecycle: recall,
-  remember, invalidate, erase.
+- **remote HTTP** — a shared mnemostack service (the tenant is resolved
+  from the service key). Recall uses whatever the deployment configures —
+  vector, lexical, temporal, graph — and the full write lifecycle is
+  available: remember, invalidate (soft retraction), delete.
+- **local SDK** — mnemostack as a library against your own Qdrant. Recall
+  is vector-only in this mode today; profile/user scoping rides the
+  library's tenant mechanism.
+
+The tools exposed to the model are `mnemostack_search`,
+`mnemostack_remember` and `mnemostack_forget` (soft retraction —
+recoverable server-side). Hard deletion is available through the client
+API, deliberately not as a model-callable tool.
 
 ## Install (once released)
 
