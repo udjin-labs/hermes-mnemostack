@@ -392,7 +392,14 @@ def test_session_churn_never_evicts_inflight_prefetch(provider):
             if "active" in query:
                 release.wait(timeout=5.0)
                 return [RecallHit(id="a", text="active block", score=0.9)]
-            return [RecallHit(id="f", text="filler block", score=0.5)]
+            # Fillers churn SESSION STATE and hold no block: an empty
+            # recall is cleared, not cached (an empty entry would
+            # pointlessly protect a session from eviction). This test is
+            # named for the in-flight guarantee, and competing blocks are
+            # a different rule with its own tests below — mixing them in
+            # made it depend on which worker the scheduler ran first,
+            # which is how it failed on three platforms in turn.
+            return []
 
         def close(self):
             pass
