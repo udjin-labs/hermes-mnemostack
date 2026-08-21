@@ -168,3 +168,60 @@ def test_an_unresolvable_home_is_an_error_not_a_guess(monkeypatch):
     args = cli.parse_args(["install"])
     assert cmd_install(args, out=lines.append) == 2
     assert "--hermes-home" in "\n".join(lines)
+
+
+def test_the_follow_up_command_stays_in_the_profile_it_installed_into(tmp_path):
+    """R1 (codex P2): a bare `hermes memory setup` runs against the AMBIENT
+    home. Printing that after `install --hermes-home <profile>` sends the
+    operator to configure a DIFFERENT profile than the one just verified —
+    the profile-scoped mistake this command exists to prevent, one line
+    later."""
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    assert f"HERMES_HOME={tmp_path} hermes memory setup {PLUGIN_NAME}" in out
+
+
+def test_the_follow_up_command_is_bare_when_the_home_was_ambient(tmp_path, monkeypatch):
+    """...and does NOT carry a redundant prefix when nothing was overridden."""
+    import hermes_mnemostack.install as inst
+
+    monkeypatch.setattr(inst, "resolve_hermes_home", lambda _e: (tmp_path, "ambient"))
+    lines: list[str] = []
+    args = cli.parse_args(["install"])
+    assert inst.cmd_install(args, out=lines.append) == 0, lines
+    out = "\n".join(lines)
+    assert f"Next: hermes memory setup {PLUGIN_NAME}" in out
+    assert "HERMES_HOME=" not in out
+
+
+def test_json_output_is_machine_readable(tmp_path):
+    """R1 (codex P2): `--json` was inherited by this subcommand and then
+    ignored — automation selecting a documented flag got prose."""
+    import json as _json
+
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--json"])
+    rc = cmd_install(args, out=lines.append)
+    assert rc == 0
+    body = _json.loads("\n".join(lines))
+    assert body["status"] == "ok"
+    assert body["action"] == "installed"
+    assert body["verified"] is True
+    assert body["target"] == str(_target(tmp_path))
+    assert body["files"] == list(SHIM_FILES)
+    assert body["next"].endswith(f"hermes memory setup {PLUGIN_NAME}")
+
+
+def test_json_output_carries_failures_too(tmp_path, monkeypatch):
+    import json as _json
+
+    import hermes_mnemostack.install as inst
+
+    monkeypatch.setattr(inst, "_package_importable", lambda: (False, "ModuleNotFoundError"))
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--json"])
+    assert cmd_install(args, out=lines.append) == 2
+    body = _json.loads("\n".join(lines))
+    assert body["status"] == "error"
+    assert "not importable" in body["error"]
+    assert body["action"] is None

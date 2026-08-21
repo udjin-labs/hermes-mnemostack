@@ -20,6 +20,7 @@ Two things it deliberately does not leave to chance:
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -130,53 +131,107 @@ def verify_discovery(home: Path) -> tuple[bool, str]:
     return True, f"hermes loads it (provider name: {getattr(provider, 'name', '?')})"
 
 
+def _setup_command(home: Path, explicit: bool) -> str:
+    """The follow-up command, scoped to the home we just installed into.
+
+    A bare `hermes memory setup` runs against the AMBIENT home. Printing
+    that after `install --hermes-home <profile>` sends the operator to
+    configure a different profile than the one just verified — the same
+    profile-scoped mistake this command exists to prevent, one line later.
+    """
+    base = f"hermes memory setup {PLUGIN_NAME}"
+    return f"HERMES_HOME={home} {base}" if explicit else base
+
+
 def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
+    as_json = bool(getattr(args, "json", False))
+    lines: list[str] = []
+    result: dict[str, Any] = {
+        "action": None,
+        "hermes_home": None,
+        "hermes_home_source": None,
+        "target": None,
+        "package": None,
+        "files": list(SHIM_FILES),
+        "verified": None,
+        "verdict": None,
+        "next": None,
+        "error": None,
+    }
+
+    def say(message: str) -> None:
+        lines.append(message)
+
+    def finish(rc: int) -> int:
+        if as_json:
+            out(json.dumps({**result, "status": "ok" if rc == 0 else "error"}, indent=2))
+        else:
+            for line in lines:
+                out(line)
+        return rc
+
+    explicit = bool(getattr(args, "hermes_home", None))
     home, how = resolve_hermes_home(getattr(args, "hermes_home", None))
+    result["hermes_home_source"] = how
     if home is None:
-        out(f"error: cannot resolve the Hermes home — {how}")
-        out("       pass --hermes-home <path> to install into a known profile")
-        return 2
+        result["error"] = f"cannot resolve the Hermes home — {how}"
+        say(f"error: {result['error']}")
+        say("       pass --hermes-home <path> to install into a known profile")
+        return finish(2)
     target = home / "plugins" / PLUGIN_NAME
-    out(f"Hermes home:  {home}  ({how})")
-    out(f"Target:       {target}")
+    result["hermes_home"] = str(home)
+    result["target"] = str(target)
+    say(f"Hermes home:  {home}  ({how})")
+    say(f"Target:       {target}")
 
     ok, detail = _package_importable()
     if not ok:
         # Refuse rather than install a shim that will vanish silently: the
         # import happens during DISCOVERY, before pip_dependencies is ever
         # read, and its failure is invisible at debug level.
-        out(f"error: hermes_mnemostack is not importable here — {detail}")
-        out("       install the package first: pip install hermes-mnemostack")
-        return 2
-    out(f"Package:      hermes-mnemostack {detail}")
+        result["error"] = f"hermes_mnemostack is not importable here — {detail}"
+        say(f"error: {result['error']}")
+        say("       install the package first: pip install hermes-mnemostack")
+        return finish(2)
+    result["package"] = detail
+    say(f"Package:      hermes-mnemostack {detail}")
 
     state = _target_state(target)
     if state == "foreign" and not getattr(args, "force", False):
-        out(f"error: {target} exists and is not this shim — refusing to overwrite it")
-        out("       remove it, or re-run with --force if it really is ours")
-        return 2
+        result["error"] = f"{target} exists and is not this shim"
+        say(f"error: {result['error']} — refusing to overwrite it")
+        say("       remove it, or re-run with --force if it really is ours")
+        return finish(2)
 
     source = shim_source()
     missing = [f for f in SHIM_FILES if not (source / f).is_file()]
     if missing:
-        out(f"error: the installed package is missing shim file(s): {', '.join(missing)}")
-        return 2
+        result["error"] = f"the installed package is missing shim file(s): {', '.join(missing)}"
+        say(f"error: {result['error']}")
+        return finish(2)
 
     if getattr(args, "dry_run", False):
         verb = "would replace" if state != "absent" else "would create"
-        out(f"dry-run: {verb} {target} ({', '.join(SHIM_FILES)})")
-        return 0
+        result["action"] = verb.replace("would ", "would-")
+        result["next"] = _setup_command(home, explicit)
+        say(f"dry-run: {verb} {target} ({', '.join(SHIM_FILES)})")
+        return finish(0)
 
     target.mkdir(parents=True, exist_ok=True)
     for name in SHIM_FILES:
         shutil.copyfile(source / name, target / name)
-    out(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
+    result["action"] = "replaced" if state != "absent" else "installed"
+    say(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
 
     found, verdict = verify_discovery(home)
-    out(f"{'✓' if found else '✗'} {verdict}")
+    result["verified"] = found
+    result["verdict"] = verdict
+    say(f"{'✓' if found else '✗'} {verdict}")
     if not found:
-        out("       the files are in place but hermes does not load them —")
-        out("       check that this python is the one hermes runs")
-        return 1
-    out("Next: hermes memory setup mnemostack")
-    return 0
+        result["error"] = verdict
+        say("       the files are in place but hermes does not load them —")
+        say("       check that this python is the one hermes runs")
+        return finish(1)
+    result["next"] = _setup_command(home, explicit)
+    say(f"Next: {result['next']}")
+    return finish(0)
