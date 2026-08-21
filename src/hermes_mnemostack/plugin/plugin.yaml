@@ -1,5 +1,5 @@
 name: mnemostack
-version: 0.9.0
+version: 0.9.1
 description: "mnemostack — persistent agent memory over a mnemostack service or a local Qdrant: hybrid recall, verbatim capture with self-echo suppression, and soft retraction."
 # Deliberately WITHOUT a version specifier. hermes 0.19's CLI setup path
 # derives an import name with `dep.replace("-", "_").split("[")[0]`, which
