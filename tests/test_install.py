@@ -843,3 +843,33 @@ def test_a_concurrent_installers_scratch_is_not_swept(tmp_path):
     rc, out = _run(tmp_path)
     assert rc == 0, out
     assert fresh.exists(), "a live installer's scratch was swept"
+
+
+def test_a_scratch_entry_that_vanishes_mid_inspection_is_not_a_stray(tmp_path):
+    """R9 (codex P2): two first-time installs overlapping — the other one
+    moves its scratch to `__init__.py` after the marker check and before
+    the kind check, so the entry is simply gone. Reading that as a stray
+    told a perfectly good concurrent install that its own directory
+    belonged to a stranger."""
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    ghost = target / f".{SHIM_FILES[0]}.4242.tmp"  # never created
+    assert inst.is_scratch(ghost) is True  # gone is not foreign
+
+    # And the state inspection reaches "ours" rather than "foreign" when
+    # the only entry it can see is one that disappeared under it.
+    real_iterdir = pathlib.Path.iterdir
+    inspected: list = []
+
+    def _iterdir(self):
+        if self == target and not inspected:
+            inspected.append(True)
+            return iter([ghost])
+        return real_iterdir(self)
+
+    import unittest.mock as _mock
+
+    with _mock.patch.object(pathlib.Path, "iterdir", _iterdir):
+        assert inst._target_state(target) == "ours"

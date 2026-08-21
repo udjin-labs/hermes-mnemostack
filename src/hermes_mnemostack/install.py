@@ -74,9 +74,18 @@ def is_scratch(entry: Path) -> bool:
     if not _SCRATCH_RE.fullmatch(entry.name):
         return False
     try:
-        return entry.is_file() and not entry.is_symlink()
+        mode = entry.lstat().st_mode
+    except FileNotFoundError:
+        # It vanished while we were looking — another installer just moved
+        # its scratch into place. Whatever it was, it is not a stray now,
+        # and calling it one would tell that run its own directory belongs
+        # to a stranger.
+        return True
     except OSError:  # pragma: no cover — unreadable entry
         return False
+    # lstat, so a SYMLINK reports as a link and not as the regular file it
+    # points at: O_CREAT|O_EXCL only ever made a regular file.
+    return stat.S_ISREG(mode)
 
 
 def shim_source() -> Path:
