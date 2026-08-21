@@ -438,3 +438,71 @@ def test_a_link_planted_after_the_check_is_still_not_followed(tmp_path, monkeypa
     assert outside.read_text(encoding="utf-8") == "NOT OURS\n"  # untouched
     assert not destination.is_symlink()  # the link was replaced, not written through
     assert destination.read_text(encoding="utf-8").startswith("# mnemostack")
+
+
+def test_the_link_check_asks_about_redirection_not_about_symlinks(tmp_path, monkeypatch):
+    """R3 (codex P1): `is_symlink()` is False for an NTFS junction, which
+    redirects just as well — and Windows is in this project's test matrix.
+    The check reads the reparse tag too, so the question it asks is "does
+    this path go somewhere else", not "is it a POSIX symlink"."""
+    import os
+    import stat as stat_mod
+
+    import hermes_mnemostack.install as inst
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert inst.is_link_like(plain) is False
+    assert inst.is_link_like(tmp_path / "absent") is False
+    link = tmp_path / "link"
+    link.symlink_to(plain, target_is_directory=True)
+    assert inst.is_link_like(link) is True
+
+    # A junction reports no symlink but carries a reparse tag; simulate the
+    # platform difference by giving lstat the tag Windows would report.
+    real_lstat = os.lstat
+
+    class _Junction:
+        st_reparse_tag = getattr(stat_mod, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+        def __getattr__(self, item):
+            return getattr(real_lstat(plain), item)
+
+    class _WindowsStat:
+        IO_REPARSE_TAG_MOUNT_POINT = _Junction.st_reparse_tag
+        IO_REPARSE_TAG_SYMLINK = 0xA000000C
+
+    monkeypatch.setattr(
+        os, "lstat", lambda p, *a, **k: _Junction() if str(p) == str(plain) else real_lstat(p)
+    )
+    monkeypatch.setattr(inst, "stat", _WindowsStat)  # the constants Windows has
+    assert inst.is_link_like(plain) is True
+
+
+def test_a_link_planted_at_the_filename_cannot_be_written_through(tmp_path, monkeypatch):
+    """O_NOFOLLOW on the create: even having passed the check, the write
+    refuses to open a link at the destination filename."""
+    import hermes_mnemostack.install as inst
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("NOT OURS\n", encoding="utf-8")
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+
+    original_unlink = pathlib.Path.unlink
+    destination = _target(tmp_path) / "README.md"
+
+    def _plant(self, *args, **kwargs):
+        original_unlink(self, *args, **kwargs)
+        if self == destination:  # the race, exactly between unlink and open
+            self.symlink_to(outside)
+
+    monkeypatch.setattr(inst, "link_problem", lambda _h, _t: None)
+    monkeypatch.setattr(pathlib.Path, "unlink", _plant)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    rc = inst.cmd_install(args, out=lines.append)
+    assert outside.read_text(encoding="utf-8") == "NOT OURS\n"  # never written through
+    # A refusal with a diagnosis, not a traceback.
+    assert rc == 2, lines
+    assert "changed at the destination mid-install" in "\n".join(lines)

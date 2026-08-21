@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
-import shutil
+import stat
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -66,6 +67,29 @@ def resolve_hermes_home(explicit: str | None) -> tuple[Path | None, str]:
         return None, f"hermes could not resolve its home ({type(exc).__name__})"
 
 
+def is_link_like(path: Path) -> bool:
+    """Whether this path redirects elsewhere — symlink OR junction.
+
+    `Path.is_symlink()` is False for an NTFS directory junction, which
+    redirects just as effectively; Windows is in this project's test
+    matrix, so "is it a symlink" is the wrong question to ask there. The
+    reparse tag answers the right one.
+    """
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:  # pragma: no cover — unreadable parent
+        return True  # cannot tell: treat as unsafe
+    try:
+        tag = getattr(os.lstat(path), "st_reparse_tag", 0)
+    except OSError:
+        return False  # absent: nothing to redirect through
+    return tag in (
+        getattr(stat, "IO_REPARSE_TAG_SYMLINK", -1),
+        getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", -1),
+    )
+
+
 def link_problem(home: Path, target: Path) -> str | None:
     """Why this destination cannot be written to, or None.
 
@@ -81,13 +105,13 @@ def link_problem(home: Path, target: Path) -> str | None:
     symlinked Hermes home is a legitimate setup.
     """
     for ancestor in (target.parent, target):
-        if ancestor.is_symlink():
+        if is_link_like(ancestor):
             what = "the plugins directory" if ancestor == target.parent else "the target"
             return f"{ancestor} is a symlink ({what})"
     if target.is_dir():
         for name in SHIM_FILES:
             entry = target / name
-            if entry.is_symlink():
+            if is_link_like(entry):
                 return f"{entry} is a symlink"
     return None
 
@@ -104,7 +128,7 @@ def _target_state(target: Path) -> str:
     must be caught here too: `exists()` follows links and reports False
     for it, which would classify it "absent" and then crash on mkdir.
     """
-    if target.is_symlink():
+    if is_link_like(target):
         return "symlink"
     if not target.exists():
         return "absent"
@@ -295,11 +319,31 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
     target.mkdir(parents=True, exist_ok=True)
     for name in SHIM_FILES:
         destination = target / name
-        # Replace, never write INTO: unlink drops a link itself rather
-        # than following it, so even a race that plants one between the
-        # check above and this line cannot redirect the write.
-        destination.unlink(missing_ok=True)
-        shutil.copyfile(source / name, destination)
+        # Replace, never write INTO. unlink drops a link itself rather than
+        # following it, and the create is O_NOFOLLOW|O_EXCL, so a link
+        # planted at this FILENAME between the check and the write cannot
+        # redirect it either.
+        #
+        # Residual, stated rather than claimed away: a parent directory
+        # swapped for a link after link_problem() ran would still be
+        # followed. Closing that needs dir_fd-relative opens, which this
+        # command does not do — and an attacker who can win that race
+        # already owns the plugins directory and can simply place a plugin
+        # there. Not a defence this installer can honestly offer.
+        try:
+            destination.unlink(missing_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(destination, flags, 0o644)
+            with open(fd, "wb") as handle:
+                handle.write((source / name).read_bytes())
+        except OSError as exc:
+            # A refusal, not a traceback: O_EXCL/O_NOFOLLOW failing here
+            # means something appeared at the destination after the check —
+            # which is exactly the case an operator needs told, clearly.
+            result["error"] = f"could not write {destination}: {exc}"
+            say(f"error: {result['error']}")
+            say("       something changed at the destination mid-install; re-run")
+            return finish(2)
     result["action"] = "replaced" if state != "absent" else "installed"
     say(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
 
