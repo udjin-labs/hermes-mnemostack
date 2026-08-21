@@ -10,6 +10,7 @@ an install that would disappear.
 
 from __future__ import annotations
 
+import os
 import pathlib
 
 import pytest
@@ -978,7 +979,17 @@ def test_the_scratch_file_is_readable_before_it_is_moved(tmp_path):
     rc, out = _run(tmp_path)
     assert rc == 0, out
     for name in SHIM_FILES:
-        mode = (_target(tmp_path) / name).stat().st_mode
+        path = _target(tmp_path) / name
+        assert path.is_file(), name
+        if os.name == "nt":
+            # Windows has no POSIX mode to assert: `stat` synthesizes 0666
+            # for anything writable, so `S_IWOTH` is set on every ordinary
+            # file and says nothing about who may write it. The install
+            # code skips `fchmod` there for the same reason — access comes
+            # from the ACL the file inherits from its directory — so on
+            # this platform there is nothing here left to check.
+            continue
+        mode = path.stat().st_mode
         assert mode & _stat.S_IROTH, name
         assert not mode & _stat.S_IWOTH, name
 
