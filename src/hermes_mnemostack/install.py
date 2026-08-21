@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import stat
+import tempfile
 import time as _time
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -49,7 +50,7 @@ PLUGIN_NAME = "mnemostack"
 #: single interrupted run would make the target look like a stranger's
 #: directory and every later retry would demand --force.
 _SCRATCH_RE = re.compile(
-    r"\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.\d+\.tmp"
+    r"\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.[A-Za-z0-9_]+\.tmp"
 )
 
 #: How long a scratch file must have sat there before a later install
@@ -407,7 +408,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         # command does not do — and an attacker who can win that race
         # already owns the plugins directory and can simply place a plugin
         # there. Not a defence this installer can honestly offer.
-        scratch = target / f".{name}.{os.getpid()}.tmp"
+        scratch: Path | None = None
         created = False
         try:
             # mkdir is INSIDE the guard: it raises NotADirectoryError when
@@ -415,11 +416,18 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             # misconfiguration with a traceback — and, in --json mode, with
             # no JSON at all — has failed at its one job.
             target.mkdir(parents=True, exist_ok=True)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(scratch, flags, 0o644)
-            created = True  # from here on, that file is provably ours
+            # mkstemp, not a name we compose: it picks a name nothing else
+            # holds and creates it exclusively in one step. A name of our
+            # own — even with the pid in it — can collide with a leftover
+            # from a killed run, and a container where every invocation is
+            # pid 1 would then fail forever, since the sweep that would
+            # clear it comes later.
+            fd, made = tempfile.mkstemp(dir=target, prefix=f".{name}.", suffix=".tmp")
+            scratch = Path(made)
+            created = True  # mkstemp made it: provably ours
             with open(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
+            os.chmod(scratch, 0o644)  # mkstemp is 0600; these are read-only data
             os.replace(scratch, destination)
         except OSError as exc:
             # Remove only what WE created. O_EXCL failing means something
@@ -431,7 +439,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             #
             # Cleanup must also not replace the diagnosis with its own
             # failure: the operator needs the ORIGINAL error either way.
-            if created:
+            if created and scratch is not None:
                 try:
                     scratch.unlink(missing_ok=True)
                 except OSError:

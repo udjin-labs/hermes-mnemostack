@@ -874,33 +874,37 @@ def test_a_scratch_entry_that_vanishes_mid_inspection_is_not_a_stray(tmp_path):
         assert inst._target_state(target) == "ours"
 
 
-def test_cleanup_removes_only_what_this_run_created(tmp_path):
-    """R10 (review agent P2): the error handler deleted whatever sat at
-    the scratch path, on the strength of the NAME alone. A stranger's file
-    at exactly `.<shimfile>.<our pid>.tmp` makes O_EXCL fail — correctly —
-    and the cleanup then destroyed their data. We remove only the file our
-    own open created."""
+def test_a_scratch_name_cannot_collide_with_anything(tmp_path):
+    """R10 (review agent P2) then R11 (codex P2): a name WE compose can
+    collide — with a stranger's file, or with a leftover from a killed run
+    once the pid is reused, which in a container where every invocation is
+    pid 1 meant failing forever. mkstemp picks a name nothing else holds
+    and creates it in the same step, so there is nothing to collide with
+    and nothing to delete on someone else's behalf."""
     import os as _os
 
     import hermes_mnemostack.install as inst
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
-    collision = target / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
-    collision.write_text("STRANGER DATA\n", encoding="utf-8")
+    decoy = target / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
+    decoy.write_text("STRANGER DATA\n", encoding="utf-8")
 
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
-    assert inst.cmd_install(args, out=lines.append) == 2
-    assert "File exists" in "\n".join(lines) or "exists" in "\n".join(lines)
-    assert collision.read_text(encoding="utf-8") == "STRANGER DATA\n"
+    assert inst.cmd_install(args, out=lines.append) == 0, lines
+    assert decoy.read_text(encoding="utf-8") == "STRANGER DATA\n"  # untouched
+    assert SHIM_MARKER in (target / "__init__.py").read_text(encoding="utf-8")
+
+    # ...and the same run again, with the pid unchanged, still works.
+    lines = []
+    assert inst.cmd_install(args, out=lines.append) == 0, lines
 
 
 def test_cleanup_still_removes_our_own_failed_write(tmp_path, monkeypatch):
     """The other half of the provenance rule: a scratch file this run DID
     create and then failed to move into place is still tidied away."""
     import errno as _errno
-    import os as _os
 
     import hermes_mnemostack.install as inst
 
@@ -912,5 +916,5 @@ def test_cleanup_still_removes_our_own_failed_write(tmp_path, monkeypatch):
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
     assert inst.cmd_install(args, out=lines.append) == 2
     monkeypatch.setattr(inst.os, "replace", real_replace)
-    scratch = _target(tmp_path) / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
-    assert not scratch.exists()
+    leftovers = [e.name for e in _target(tmp_path).iterdir() if e.name.endswith(".tmp")]
+    assert leftovers == []
