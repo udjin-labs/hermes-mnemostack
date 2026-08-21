@@ -224,7 +224,12 @@ def test_json_output_is_machine_readable(tmp_path):
     assert body["verified"] is True
     assert body["target"] == str(_target(tmp_path))
     assert body["files"] == list(SHIM_FILES)
-    assert body["next"].endswith(f"hermes memory setup {PLUGIN_NAME}")
+    # Contained, not suffixed: this asserts that automation is handed the
+    # setup step, and the step is not always last — the Windows form wraps
+    # it in try/finally so the shell is left as it was found. Pinning the
+    # suffix pinned one platform's SHAPE of the hint, which is why it broke
+    # every Windows job the moment that shape changed.
+    assert f"hermes memory setup {PLUGIN_NAME}" in body["next"]
 
 
 def test_json_output_carries_failures_too(tmp_path, monkeypatch):
@@ -290,17 +295,20 @@ def test_the_scoped_setup_command_speaks_the_shell_the_operator_has(monkeypatch,
     run would never execute."""
     import hermes_mnemostack.install as inst
 
-    # Built from the rendered path, not a literal: patching `os.name` also
-    # decides which flavour `pathlib` gives us, so the separator here is
-    # whichever one the branch under test would really print.
+    # The path flavour is chosen EXPLICITLY, not inherited from the patched
+    # `os.name`. Letting `pathlib.Path` pick it up as a side effect made the
+    # test depend on being able to instantiate a `WindowsPath` on the host —
+    # which Python 3.11 refuses outright on POSIX, so every 3.11 job died
+    # with an INTERNALERROR rather than a readable failure. `_setup_command`
+    # only ever renders `str(home)`, so a pure path is the honest input.
     monkeypatch.setattr(inst.os, "name", "posix")
-    home = pathlib.Path("/tmp/my profile")
+    home = pathlib.PurePosixPath("/tmp/my profile")
     assert inst._setup_command(home, explicit=True) == (
         f"HERMES_HOME='{home}' hermes memory setup {PLUGIN_NAME}"
     )
 
     monkeypatch.setattr(inst.os, "name", "nt")
-    home = pathlib.Path("/tmp/my profile")
+    home = pathlib.PureWindowsPath(r"C:\Users\op\my profile")
     line = inst._setup_command(home, explicit=True)
     assert line.startswith(f"& {{ $prev=$env:HERMES_HOME; $env:HERMES_HOME='{home}';"), line
     # The hint must not reconfigure the shell it is pasted into: unlike the
@@ -333,7 +341,7 @@ def test_the_scoped_setup_command_speaks_the_shell_the_operator_has(monkeypatch,
     # A quote in the path is doubled, the only escape PowerShell has inside
     # a single-quoted string — an unescaped one would end the literal and
     # leave the rest of the path as bare tokens.
-    odd = pathlib.Path("/tmp/o'brien")
+    odd = pathlib.PureWindowsPath("C:/tmp/o'brien")
     doubled = str(odd).replace("'", "''")
     assert f"'{doubled}'" in inst._setup_command(odd, explicit=True)
 
