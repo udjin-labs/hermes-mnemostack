@@ -906,12 +906,38 @@ class MnemostackProvider(MemoryProvider):
                         # worker's own cleanup prune, which runs the
                         # instant that worker gives up its thread
                         # protection.
-                        eligible = (
-                            k
-                            for k in (*self._prefetched, *d)
-                            if k != protect and k not in self._prefetch_threads
+                        # Leftovers first: a key with neither a thread nor
+                        # a block is state nothing is coming back for.
+                        victim = next(
+                            (
+                                k
+                                for k in d
+                                if k != protect
+                                and k not in self._prefetch_threads
+                                and k not in self._prefetched
+                            ),
+                            None,
                         )
-                        victim = next(eligible, None)
+                        # Only then a real block, oldest by DELIVERY —
+                        # `_prefetched` is pop-then-assign on store, so its
+                        # order is when work ARRIVED, not when a session was
+                        # queued. And only while the blocks THEMSELVES are
+                        # over the bound: pressure from work in flight
+                        # drains on its own as each worker finishes, so
+                        # spending it on the one result that has landed is
+                        # the worst possible trade. It was the real one —
+                        # a released worker that stored while five filler
+                        # threads were still unscheduled left exactly one
+                        # block in the process, and the cap ate it.
+                        if victim is None and len(self._prefetched) > self._MAX_SESSION_STATES:
+                            victim = next(
+                                (
+                                    k
+                                    for k in self._prefetched
+                                    if k != protect and k not in self._prefetch_threads
+                                ),
+                                None,
+                            )
                         if victim is None:
                             break
                         logger.warning(

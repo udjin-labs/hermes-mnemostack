@@ -1357,3 +1357,48 @@ def test_the_hard_cap_drops_the_oldest_block_not_the_oldest_arrival(provider):
     survived = p._prefetched.get(p._session_key("first"), ("", 0, ()))[0]
     assert survived == "first block", "the freshest block was evicted as the oldest arrival"
     assert len(p._prefetched) <= 4  # ...and the cap was still enforced
+
+
+def test_work_in_flight_never_costs_the_one_result_that_landed(provider):
+    """CI (macOS/3.13, after the delivery-order fix): the released worker
+    stored its block while five filler threads were still unscheduled, so
+    the process held ONE block and five in-flight sessions. The hard cap
+    then evicted the only thing anyone could use — everything else was
+    thread-protected, so the single delivered block was the only eligible
+    victim.
+
+    Pressure from work in flight drains by itself as each worker finishes;
+    the cap exists for state nothing is coming back for. So it may spend a
+    block only while the BLOCKS are over the bound."""
+    import threading as _threading
+
+    p, _fake = provider
+    p._MAX_SESSION_STATES = 2  # hard cap at 4
+
+    live = _threading.Event()
+
+    def _parked() -> None:
+        live.wait(timeout=10.0)
+
+    threads = []
+    for sid in ("f1", "f2", "f3", "f4", "f5"):
+        t = _threading.Thread(target=_parked, daemon=True)
+        t.start()
+        threads.append(t)
+        key = p._session_key(sid)
+        p._prefetch_gen[key] = 1
+        p._prefetch_threads[key] = t  # in flight, protected
+    landed = p._session_key("active")
+    p._prefetch_gen[landed] = 1
+    p._prefetched[landed] = ("active block", 1, ("active text",))  # the only result
+
+    try:
+        with p._lock:
+            p._prune_session_dicts_locked()
+        assert p._prefetched.get(landed, ("", 0, ()))[0] == "active block", (
+            "the cap ate the only delivered block to make room for work in flight"
+        )
+    finally:
+        live.set()
+        for t in threads:
+            t.join(timeout=5.0)
