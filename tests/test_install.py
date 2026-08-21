@@ -606,3 +606,50 @@ def test_a_half_written_install_can_be_retried(tmp_path, monkeypatch):
     assert rc == 0, out
     for name in SHIM_FILES:
         assert (_target(tmp_path) / name).is_file(), name
+
+
+def test_matching_filenames_alone_do_not_make_a_directory_ours(tmp_path):
+    """R5 (codex P2): the retry relaxation accepted a markerless directory
+    whenever its entries happened to be named like ours — so a stranger's
+    plugin.yaml and README.md would have been unlinked and overwritten by
+    a plain install, defeating the foreign-plugin guard. Only an EMPTY
+    directory is a half-written install of ours; our own partial writes
+    always leave `__init__.py`, which carries the marker."""
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    theirs = target / "plugin.yaml"
+    theirs.write_text("name: someone-else\n", encoding="utf-8")
+    (target / "README.md").write_text("their docs\n", encoding="utf-8")
+
+    rc, out = _run(tmp_path)
+    assert rc == 2, out
+    assert "is not this shim" in out
+    assert theirs.read_text(encoding="utf-8") == "name: someone-else\n"
+
+
+def test_an_unreadable_target_is_reported_not_crashed_into(tmp_path):
+    """R5 (codex P2): `iterdir()` on a directory without read permission
+    raised outside the command's handler — a traceback, and no JSON under
+    --json. We cannot tell whose it is, so we refuse and say why."""
+    import json as _json
+    import os as _os
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    _os.chmod(target, 0o300)  # writable and searchable, NOT listable
+    try:
+        lines: list[str] = []
+        args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--json"])
+        rc = cmd_install(args, out=lines.append)
+        if rc == 0:  # running as root, where the mode does not bite
+            pytest.skip("this user can list a mode-300 directory")
+        body = _json.loads("\n".join(lines))
+        assert body["status"] == "error"
+        assert "cannot inspect" in body["error"]
+        # ...and --force cannot claim ownership of something unreadable.
+        lines = []
+        args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--force"])
+        assert cmd_install(args, out=lines.append) == 2
+        assert "cannot inspect" in "\n".join(lines)
+    finally:
+        _os.chmod(target, 0o700)

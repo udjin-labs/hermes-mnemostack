@@ -143,18 +143,22 @@ def _target_state(target: Path) -> str:
     if init.is_file():
         marked = SHIM_MARKER in init.read_text(encoding="utf-8", errors="replace")
         return "ours" if marked else "foreign"
-    # No `__init__.py`: either an empty directory, or OUR OWN half-written
-    # install (a write that failed part way leaves the directory and
-    # whatever landed before it). Refusing that as "foreign" would strand
-    # the operator — the retry after a full disk or a permission error is
-    # exactly when the command has to work. Anything carrying entries we
-    # never write is still someone else's.
-    strays = [
-        entry.name
-        for entry in target.iterdir()
-        if entry.name not in SHIM_FILES and entry.name != "__pycache__"
-    ]
-    return "foreign" if strays else "ours"
+    # No `__init__.py`. An EMPTY directory is our own half-written install
+    # — mkdir succeeded and the first write did not — and refusing that as
+    # "foreign" would strand the operator at exactly the moment a retry
+    # has to work. Anything else is someone else's: matching FILENAMES
+    # prove nothing (a directory holding a stranger's plugin.yaml and
+    # README.md would qualify on names alone, and a plain install would
+    # then overwrite them), and our own partial installs always write
+    # `__init__.py` first, so they carry the marker.
+    try:
+        empty = not any(target.iterdir())
+    except OSError as exc:
+        # Statted but not listable. We cannot tell whose it is, so we do
+        # not touch it — and we say why, rather than letting the traceback
+        # escape past the command's own error reporting.
+        return f"unreadable: {exc.strerror or exc}"
+    return "ours" if empty else "foreign"
 
 
 def _package_importable() -> tuple[bool, str]:
@@ -303,6 +307,13 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         return finish(2)
 
     state = _target_state(target)
+    if state.startswith("unreadable"):
+        # Not overridable: --force says "this plugin is ours", which is a
+        # claim nobody can make about a directory they cannot read.
+        result["error"] = f"cannot inspect {target} ({state.split(': ', 1)[-1]})"
+        say(f"error: {result['error']}")
+        say("       fix its permissions, or remove it, then re-run")
+        return finish(2)
     if state == "foreign" and not getattr(args, "force", False):
         result["error"] = f"{target} exists and is not this shim"
         say(f"error: {result['error']} — refusing to overwrite it")
