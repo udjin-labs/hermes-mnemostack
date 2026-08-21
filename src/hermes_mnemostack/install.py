@@ -49,8 +49,18 @@ PLUGIN_NAME = "mnemostack"
 #: inspection ignores them and the next install removes them; otherwise a
 #: single interrupted run would make the target look like a stranger's
 #: directory and every later retry would demand --force.
+#: Our own namespace inside the scratch name. Without it the pattern has
+#: to guess what `tempfile` generates, and a foreign `.README.md.backup.tmp`
+#: reads as ours — enough to make a stranger's directory pass the
+#: ownership check and to have that file swept later.
+SCRATCH_TAG = "hmshim"
+
 _SCRATCH_RE = re.compile(
-    r"\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.[A-Za-z0-9_]+\.tmp"
+    r"\.(?:"
+    + "|".join(re.escape(n) for n in SHIM_FILES)
+    + r")\."
+    + re.escape(SCRATCH_TAG)
+    + r"[A-Za-z0-9_]+\.tmp"
 )
 
 #: How long a scratch file must have sat there before a later install
@@ -422,12 +432,19 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             # from a killed run, and a container where every invocation is
             # pid 1 would then fail forever, since the sweep that would
             # clear it comes later.
-            fd, made = tempfile.mkstemp(dir=target, prefix=f".{name}.", suffix=".tmp")
+            fd, made = tempfile.mkstemp(
+                dir=target, prefix=f".{name}.{SCRATCH_TAG}", suffix=".tmp"
+            )
             scratch = Path(made)
             created = True  # mkstemp made it: provably ours
             with open(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
-            os.chmod(scratch, 0o644)  # mkstemp is 0600; these are read-only data
+                # Through the DESCRIPTOR, not the path: a path-based chmod
+                # follows symlinks, so a rename plus a planted link
+                # between the close and the call would re-mode an
+                # unrelated file outside the Hermes home. mkstemp opens at
+                # 0600 and these are read-only data files.
+                os.fchmod(handle.fileno(), 0o644)
             os.replace(scratch, destination)
         except OSError as exc:
             # Remove only what WE created. O_EXCL failing means something

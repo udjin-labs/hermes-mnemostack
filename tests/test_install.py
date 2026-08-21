@@ -716,7 +716,7 @@ def test_a_killed_run_does_not_make_the_target_look_foreign(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
-    orphan = target / f".{SHIM_FILES[0]}.4242.tmp"
+    orphan = target / f".{SHIM_FILES[0]}.{inst.SCRATCH_TAG}4242.tmp"
     orphan.write_bytes(b"half-written\n")
     assert inst.is_scratch(orphan)
     import os as _os
@@ -736,7 +736,12 @@ def test_a_strangers_dotfile_is_not_mistaken_for_scratch(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
-    for name in (".plugin.yaml.tmp", ".secrets.4242.tmp", "__init__.py.4242.tmp"):
+    for name in (
+        ".plugin.yaml.tmp",  # no tag, no random part
+        f".secrets.{inst.SCRATCH_TAG}4242.tmp",  # not one of ours
+        f"__init__.py.{inst.SCRATCH_TAG}4242.tmp",  # no leading dot
+        ".README.md.backup.tmp",  # a foreign backup, tag absent
+    ):
         entry = target / name
         entry.write_bytes(b"x")
         assert not inst.is_scratch(entry), name
@@ -790,7 +795,7 @@ def test_only_a_regular_file_can_be_our_leftover(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
-    name = f".{SHIM_FILES[0]}.4242.tmp"
+    name = f".{SHIM_FILES[0]}.{inst.SCRATCH_TAG}4242.tmp"
 
     (target / name).mkdir()
     assert not inst.is_scratch(target / name)
@@ -821,8 +826,9 @@ def test_a_trailing_newline_cannot_smuggle_a_name_past_the_pattern(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
+
     try:
-        smuggled = target / f".{SHIM_FILES[0]}.123.tmp\n"
+        smuggled = target / f".{SHIM_FILES[0]}.{inst.SCRATCH_TAG}123.tmp\n"
         smuggled.write_bytes(b"theirs")
     except OSError:  # pragma: no cover — filesystem forbids the name
         pytest.skip("this filesystem does not allow newlines in names")
@@ -835,9 +841,11 @@ def test_a_concurrent_installers_scratch_is_not_swept(tmp_path):
     scratch file between its create and its os.replace, failing that run
     with ENOENT for no filesystem reason. Only files old enough to be
     nobody's work in progress are swept."""
+    import hermes_mnemostack.install as inst
+
     rc, out = _run(tmp_path)
     assert rc == 0, out
-    fresh = _target(tmp_path) / f".{SHIM_FILES[1]}.99999.tmp"
+    fresh = _target(tmp_path) / f".{SHIM_FILES[1]}.{inst.SCRATCH_TAG}99999.tmp"
     fresh.write_bytes(b"another install is writing this right now")
     rc, out = _run(tmp_path)
     assert rc == 0, out
@@ -854,7 +862,7 @@ def test_a_scratch_entry_that_vanishes_mid_inspection_is_not_a_stray(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
-    ghost = target / f".{SHIM_FILES[0]}.4242.tmp"  # never created
+    ghost = target / f".{SHIM_FILES[0]}.{inst.SCRATCH_TAG}4242.tmp"  # never created
     assert inst.is_scratch(ghost) is True  # gone is not foreign
 
     # And the state inspection reaches "ours" rather than "foreign" when
@@ -887,18 +895,22 @@ def test_a_scratch_name_cannot_collide_with_anything(tmp_path):
 
     target = _target(tmp_path)
     target.mkdir(parents=True)
+    # A file wearing the name the installer USED to compose. It is not
+    # ours (no tag), so the directory reads as someone else's...
     decoy = target / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
     decoy.write_text("STRANGER DATA\n", encoding="utf-8")
-
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
-    assert inst.cmd_install(args, out=lines.append) == 0, lines
+    assert inst.cmd_install(args, out=lines.append) == 2, lines
     assert decoy.read_text(encoding="utf-8") == "STRANGER DATA\n"  # untouched
-    assert SHIM_MARKER in (target / "__init__.py").read_text(encoding="utf-8")
+    decoy.unlink()
 
-    # ...and the same run again, with the pid unchanged, still works.
-    lines = []
-    assert inst.cmd_install(args, out=lines.append) == 0, lines
+    # ...and with it gone, repeated installs in the SAME process (so the
+    # same pid, which used to be the colliding part of the name) all work.
+    for _ in range(3):
+        lines = []
+        assert inst.cmd_install(args, out=lines.append) == 0, lines
+    assert SHIM_MARKER in (target / "__init__.py").read_text(encoding="utf-8")
 
 
 def test_cleanup_still_removes_our_own_failed_write(tmp_path, monkeypatch):
@@ -918,3 +930,37 @@ def test_cleanup_still_removes_our_own_failed_write(tmp_path, monkeypatch):
     monkeypatch.setattr(inst.os, "replace", real_replace)
     leftovers = [e.name for e in _target(tmp_path).iterdir() if e.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def test_a_foreign_backup_is_not_read_as_our_scratch(tmp_path):
+    """R12 (codex P2): the recogniser accepted any alphanumeric middle, so
+    a foreign `.README.md.backup.tmp` read as ours — enough to make a
+    stranger's directory pass the ownership check AND to have that file
+    deleted by the sweep. The name carries our own tag now."""
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    theirs = target / f".{SHIM_FILES[2]}.backup.tmp"
+    theirs.write_text("their backup\n", encoding="utf-8")
+    assert not inst.is_scratch(theirs)
+
+    rc, out = _run(tmp_path)
+    assert rc == 2, out
+    assert theirs.read_text(encoding="utf-8") == "their backup\n"
+
+
+def test_the_scratch_file_is_readable_before_it_is_moved(tmp_path):
+    """R12 (codex P2): the mode is set through the open DESCRIPTOR, not the
+    path — a path-based chmod follows symlinks, so a rename plus a planted
+    link between close and chmod would re-mode an unrelated file outside
+    the Hermes home. The installed files must still end up world-readable
+    (mkstemp opens at 0600)."""
+    import stat as _stat
+
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    for name in SHIM_FILES:
+        mode = (_target(tmp_path) / name).stat().st_mode
+        assert mode & _stat.S_IROTH, name
+        assert not mode & _stat.S_IWOTH, name
