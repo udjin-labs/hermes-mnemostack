@@ -181,6 +181,9 @@ def test_the_follow_up_command_stays_in_the_profile_it_installed_into(tmp_path):
     later."""
     import shlex
 
+    if os.name == "nt":
+        pytest.skip("the Windows hint is PowerShell, not a shlex-parsable line")
+
     rc, out = _run(tmp_path)
     assert rc == 0, out
     line = next(ln for ln in out.splitlines() if ln.startswith("Next: "))
@@ -299,7 +302,33 @@ def test_the_scoped_setup_command_speaks_the_shell_the_operator_has(monkeypatch,
     monkeypatch.setattr(inst.os, "name", "nt")
     home = pathlib.Path("/tmp/my profile")
     line = inst._setup_command(home, explicit=True)
-    assert line == f"$env:HERMES_HOME='{home}'; hermes memory setup {PLUGIN_NAME}", line
+    assert line.startswith(f"& {{ $prev=$env:HERMES_HOME; $env:HERMES_HOME='{home}';"), line
+    # The hint must not reconfigure the shell it is pasted into: unlike the
+    # POSIX form, `$env:X = ...` outlives the command, so every later
+    # `hermes` call in that window would silently target this profile.
+    assert "$env:HERMES_HOME=$prev" in line, line
+    # ...and "no previous value" is an ABSENCE, not an empty string —
+    # assigning `$null` in PowerShell leaves the variable set to "".
+    assert "if ($null -eq $prev) { Remove-Item Env:HERMES_HOME }" in line, line
+    # R3 (codex P2): `$prev` must not outlive the paste either — it is a
+    # common variable name, and the operator may be holding their own.
+    # `& { ... }` gives the sequence a child scope; `$env:` assignments
+    # inside it still reach the process, which is what lets the restore
+    # above work from in there. Verified against PowerShell 7.
+    assert line.startswith("& { ") and line.endswith("} } }"), line
+    # R4 (codex P2): a failed setup must not read as success, and the check
+    # belongs INSIDE the try — after the restore, `$?` is the restore's own
+    # verdict, so `pwsh -Command` would exit 0 however badly setup went.
+    # `finally` still runs on the raise, so this does not skip the restore.
+    setup = f"hermes memory setup {PLUGIN_NAME}"
+    assert f'try {{ {setup}; if (-not $?) {{ throw "{setup} failed" }} }} finally {{' in line, line
+    # NOT `$LASTEXITCODE`: only NATIVE commands write it, so a `hermes`
+    # resolving to a function or script leaves an earlier command's value
+    # standing and the hint reports a failure that never happened.
+    assert "$LASTEXITCODE" not in line, line
+    # `throw`, not `exit`: inside `& { ... }` PowerShell's `exit` ends the
+    # SESSION — closing the operator's own window over a failed setup.
+    assert "exit " not in line, line
 
     # A quote in the path is doubled, the only escape PowerShell has inside
     # a single-quoted string — an unescaped one would end the literal and
@@ -317,6 +346,9 @@ def test_the_scoped_setup_command_is_shell_safe(tmp_path):
     import shlex
 
     import hermes_mnemostack.install as inst
+
+    if os.name == "nt":
+        pytest.skip("shlex reads POSIX; the Windows form has its own test")
 
     for raw in ("/tmp/my profile", "/tmp/x;touch pwned", "/tmp/plain"):
         path = pathlib.Path(raw)

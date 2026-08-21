@@ -312,7 +312,45 @@ def _setup_command(home: Path, explicit: bool) -> str:
     # not a variable assignment at all — it is a command named
     # `HERMES_HOME=...`, and the setup step simply never runs.
     if os.name == "nt":
-        return f"$env:HERMES_HOME={_powershell_quote(str(home))}; {base}"
+        # Longer than the POSIX line, and for a reason. `VAR=value command`
+        # gives POSIX four things in one clause; PowerShell has no such
+        # clause, so each one is spelled out here:
+        #
+        #   1. The variable would outlive the command. `$env:X = ...` changes
+        #      the whole session, so every later `hermes` call in that window
+        #      would silently target the profile installed here. Hence the
+        #      restore — including the case where there was no previous
+        #      value, which is an ABSENCE: assigning `$null` leaves an empty
+        #      string, so only `Remove-Item` truly unsets it.
+        #   2. `$prev` would outlive it too, clobbering an operator's own
+        #      variable of that very common name. `& { ... }` runs the
+        #      sequence in a child SCOPE so it cannot escape — while
+        #      `$env:` assignments inside still reach the process, which is
+        #      what lets the restore work from in there.
+        #   3. A failed setup would be invisible. The restore is the last
+        #      thing to run, so by the time the sequence ends `$?` reads
+        #      True and `pwsh -Command` exits 0 however badly setup went.
+        #      So the status is read INSIDE the try, where `$?` still
+        #      belongs to setup, and raised there — `finally` still runs,
+        #      so the restore is not skipped by the raise.
+        #
+        # Three shapes were measured against PowerShell 7 and rejected:
+        # `exit` (inside `& { ... }` it ends the SESSION — for a line an
+        # operator pastes into their own terminal, that closes their window
+        # over a failed setup); `Write-Error` (non-terminating, leaves the
+        # exit code at 0, which is the thing being fixed); and testing
+        # `$LASTEXITCODE` after the fact — it is only written by NATIVE
+        # commands, so a `hermes` resolving to a function or script leaves
+        # an older command's value standing and the hint reports a failure
+        # that did not happen. `$?` is the one flag every command sets.
+        quoted = _powershell_quote(str(home))
+        return (
+            f"& {{ $prev=$env:HERMES_HOME; $env:HERMES_HOME={quoted}; "
+            f'try {{ {base}; if (-not $?) {{ throw "{base} failed" }} }} '
+            "finally { "
+            "if ($null -eq $prev) { Remove-Item Env:HERMES_HOME } "
+            "else { $env:HERMES_HOME=$prev } } }"
+        )
     return f"HERMES_HOME={shlex.quote(str(home))} {base}"
 
 
