@@ -23,6 +23,7 @@ import argparse
 import errno
 import json
 import os
+import re
 import shlex
 import stat
 from collections.abc import Iterator
@@ -39,6 +40,20 @@ SHIM_FILES = ("__init__.py", "plugin.yaml", "README.md")
 SHIM_MARKER = "hermes_mnemostack.provider"
 
 PLUGIN_NAME = "mnemostack"
+
+#: Scratch files the write step leaves behind if it is KILLED between
+#: creating one and moving it into place (a crash, a SIGKILL, a pulled
+#: plug — cleanup cannot run). They are recognisably ours, so state
+#: inspection ignores them and the next install removes them; otherwise a
+#: single interrupted run would make the target look like a stranger's
+#: directory and every later retry would demand --force.
+_SCRATCH_RE = re.compile(
+    r"^\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.\d+\.tmp$"
+)
+
+
+def is_scratch(name: str) -> bool:
+    return bool(_SCRATCH_RE.match(name))
 
 
 def shim_source() -> Path:
@@ -152,7 +167,7 @@ def _target_state(target: Path) -> str:
     # then overwrite them), and our own partial installs always write
     # `__init__.py` first, so they carry the marker.
     try:
-        empty = not any(target.iterdir())
+        empty = not any(e for e in target.iterdir() if not is_scratch(e.name))
     except OSError as exc:
         # Statted but not listable. We cannot tell whose it is, so we do
         # not touch it — and we say why, rather than letting the traceback
@@ -366,7 +381,14 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
                 handle.write((source / name).read_bytes())
             os.replace(scratch, destination)
         except OSError as exc:
-            scratch.unlink(missing_ok=True)
+            # Cleanup must not replace the diagnosis with its own failure:
+            # the scratch path could itself be a directory, or the
+            # filesystem could refuse this too, and the operator needs the
+            # ORIGINAL error either way.
+            try:
+                scratch.unlink(missing_ok=True)
+            except OSError:
+                pass
             # A refusal, not a traceback — and the RIGHT refusal. EEXIST and
             # ELOOP are what O_EXCL|O_NOFOLLOW report when something
             # appeared at the destination after the check; everything else
@@ -380,6 +402,14 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             else:
                 say("       check permissions and free space on that filesystem")
             return finish(2)
+    # Sweep any scratch left by a killed run, ours by name. Best effort:
+    # failing to tidy is not a reason to fail an install that worked.
+    try:
+        for entry in target.iterdir():
+            if is_scratch(entry.name):
+                entry.unlink(missing_ok=True)
+    except OSError:
+        pass
     result["action"] = "replaced" if state != "absent" else "installed"
     say(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
 

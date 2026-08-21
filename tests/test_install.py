@@ -705,3 +705,69 @@ def test_a_failed_write_leaves_no_scratch_file_behind(tmp_path, monkeypatch):
     monkeypatch.undo()
     leftovers = [e.name for e in _target(tmp_path).iterdir() if e.name.endswith(".tmp")]
     assert leftovers == []
+
+
+def test_a_killed_run_does_not_make_the_target_look_foreign(tmp_path):
+    """R7 (codex P2): a process killed between creating a scratch file and
+    moving it into place leaves that file behind — cleanup never runs. The
+    target was then non-empty with no `__init__.py`, so every later
+    install classified it "foreign" and demanded --force after nothing but
+    a crash."""
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    orphan = target / f".{SHIM_FILES[0]}.4242.tmp"
+    orphan.write_bytes(b"half-written\n")
+    assert inst.is_scratch(orphan.name)
+
+    rc, out = _run(tmp_path)
+    assert rc == 0, out  # retried, no --force needed
+    assert not orphan.exists()  # and swept
+    assert SHIM_MARKER in (target / "__init__.py").read_text(encoding="utf-8")
+
+
+def test_a_strangers_dotfile_is_not_mistaken_for_scratch(tmp_path):
+    """The leniency is for files WE name, not for anything hidden."""
+    import hermes_mnemostack.install as inst
+
+    assert not inst.is_scratch(".plugin.yaml.tmp")  # no pid
+    assert not inst.is_scratch(".secrets.4242.tmp")  # not one of ours
+    assert not inst.is_scratch("__init__.py.4242.tmp")  # no leading dot
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    theirs = target / ".their-notes.txt"
+    theirs.write_text("keep\n", encoding="utf-8")
+    rc, out = _run(tmp_path)
+    assert rc == 2, out
+    assert "is not this shim" in out
+    assert theirs.read_text(encoding="utf-8") == "keep\n"
+
+
+def test_cleanup_failure_does_not_replace_the_diagnosis(tmp_path, monkeypatch):
+    """R7 (codex P2): `scratch.unlink()` inside the error handler could
+    raise — the scratch path being a directory, or the filesystem refusing
+    — and the operator got that traceback instead of the original
+    failure, with no JSON under --json."""
+    import errno as _errno
+    import json as _json
+
+    import hermes_mnemostack.install as inst
+
+    real_open = inst.os.open
+
+    def _fail_write(path, *a, **k):
+        if ".tmp" in str(path):
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        return real_open(path, *a, **k)
+
+    def _fail_cleanup(self, *a, **k):
+        raise PermissionError(_errno.EACCES, "Permission denied")
+
+    monkeypatch.setattr(inst.os, "open", _fail_write)
+    monkeypatch.setattr(pathlib.Path, "unlink", _fail_cleanup)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--json"])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    body = _json.loads("\n".join(lines))
+    assert "No space left on device" in body["error"]  # the ORIGINAL failure
