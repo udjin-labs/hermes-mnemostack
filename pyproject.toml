@@ -39,6 +39,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.4",
+    # A hung test must fail in seconds, not burn a CI job to its six-hour
+    # limit — which is what a Windows-only `tempfile` retry loop did here.
+    "pytest-timeout>=2.1",
     "ruff>=0.1",
     "mypy>=1.7",
 ]
@@ -79,3 +82,7 @@ no_implicit_optional = true
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+# Per test, generous next to the slowest real one (a prefetch join waits
+# 2s) and small enough that a deadlock is a red build within a minute.
+# Chosen after a Windows-only retry loop ran one job for 5:58:20.
+timeout = 60

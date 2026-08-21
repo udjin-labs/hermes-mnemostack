@@ -182,8 +182,11 @@ def test_scope_flows_from_identity_kwargs(monkeypatch, tmp_path):
     monkeypatch.setattr(pmod, "build_client", _build)
     p = MnemostackProvider()
     p.initialize(
-        "s", hermes_home=str(tmp_path), platform="cli",
-        agent_identity="coder", user_id="u42",
+        "s",
+        hermes_home=str(tmp_path),
+        platform="cli",
+        agent_identity="coder",
+        user_id="u42",
     )
     assert captured["scope"] == {"hermes_profile": "coder", "hermes_user": "u42"}
 
@@ -224,7 +227,7 @@ def test_stale_prefetch_never_overwrites_fresher_result(provider):
 
     p._client = _RacingClient()
     p.queue_prefetch("slow-old-query")  # gen 1, blocked
-    p.queue_prefetch("fresh query")     # gen 2, completes first
+    p.queue_prefetch("fresh query")  # gen 2, completes first
     _wait_threads(p)
     slow_release.set()  # old recall finishes AFTER the new one
     time.sleep(0.2)
@@ -336,12 +339,8 @@ def test_scope_tenant_encoding_is_injective():
     collide two scopes into one tenant."""
     from hermes_mnemostack.client import LocalClient
 
-    t1 = LocalClient._scope_tenant(
-        {"hermes_profile": "a", "hermes_user": "b|hermes_user=c"}
-    )
-    t2 = LocalClient._scope_tenant(
-        {"hermes_profile": "a|hermes_user=b", "hermes_user": "c"}
-    )
+    t1 = LocalClient._scope_tenant({"hermes_profile": "a", "hermes_user": "b|hermes_user=c"})
+    t2 = LocalClient._scope_tenant({"hermes_profile": "a|hermes_user=b", "hermes_user": "c"})
     assert t1 != t2
     # Canonical: order-independent.
     assert LocalClient._scope_tenant({"x": "1", "y": "2"}) == LocalClient._scope_tenant(
@@ -404,6 +403,18 @@ def test_session_churn_never_evicts_inflight_prefetch(provider):
     for i in range(5):
         p.queue_prefetch(f"filler question {i}", session_id=f"filler-{i}")
     release.set()
+    # Join the worker rather than leaning on `prefetch`'s 2s grace window.
+    # That window is a product decision — a turn must not block on recall —
+    # not a promise about how fast a loaded CI runner schedules a thread,
+    # and testing through it made this assert the runner's speed as well as
+    # the eviction rule. It failed exactly that way on macOS/3.13 while
+    # passing everywhere else. The eviction claim is unchanged: if churn
+    # had dropped the active session's state, the block would never be
+    # stored no matter how long we wait.
+    worker = p._prefetch_threads.get(p._session_key("active"))
+    if worker is not None:
+        worker.join(timeout=10.0)
+        assert not worker.is_alive(), "the prefetch worker never finished"
     assert "active block" in p.prefetch("active slow question", session_id="active")
 
 
@@ -526,7 +537,7 @@ def test_fresh_queue_survives_all_protected_prune(provider):
 
     p._client = _Slow()
     p._MAX_SESSION_STATES = 1
-    p.queue_prefetch("first question", session_id="one")   # live, protected
+    p.queue_prefetch("first question", session_id="one")  # live, protected
     p.queue_prefetch("second question", session_id="two")  # must survive queueing
     release.set()
     assert "second question" in p.prefetch("second question", session_id="two")
@@ -641,7 +652,9 @@ def test_tools_search_remember_forget(provider):
     fake.hits = [RecallHit(id="m1", text="the deploy window is Friday", score=0.876)]
     out = json.loads(p.handle_tool_call("mnemostack_search", {"query": "deploy"}))
     assert out["ok"] and out["results"][0] == {
-        "id": "m1", "text": "the deploy window is Friday", "score": 0.876,
+        "id": "m1",
+        "text": "the deploy window is Friday",
+        "score": 0.876,
     }
     out = json.loads(
         p.handle_tool_call(
@@ -1173,9 +1186,7 @@ def test_callers_own_dashes_survive_a_same_turn_block_echo(provider):
     # A dash the caller writes MID-LINE directly before an echoed span is
     # theirs (a real bullet only ever starts its line).
     fake.remembered.clear()
-    p.sync_turn(
-        f"{block}\nreminder - first recalled fact about deploys", "ack"
-    )
+    p.sync_turn(f"{block}\nreminder - first recalled fact about deploys", "ack")
     _wait_threads(p)
     stored = [i.text for b in fake.remembered for i in b]
     assert "reminder -" in stored
@@ -1286,9 +1297,7 @@ def test_tool_provenance_follows_the_calling_session(provider):
     p, fake = provider
     fact = "the incident postmortem doc lives in the ops wiki"
     fake.hits = [RecallHit(id="1", text=fact, score=0.9)]
-    p.handle_tool_call(
-        "mnemostack_search", {"query": "where is the postmortem?"}, session_id="A"
-    )
+    p.handle_tool_call("mnemostack_search", {"query": "where is the postmortem?"}, session_id="A")
     with p._lock:
         assert fact in p._recently_injected.get("A", {})
         assert "B" not in p._recently_injected
@@ -1305,9 +1314,7 @@ def test_tool_descriptions_promise_no_specific_retrieval_arms(provider):
     remote depends on deployment config, so it must not promise lexical,
     temporal or graph recall."""
     p, _fake = provider
-    search = next(
-        t for t in p.get_tool_schemas() if t["name"] == "mnemostack_search"
-    )
+    search = next(t for t in p.get_tool_schemas() if t["name"] == "mnemostack_search")
     import re
 
     text = f"{search['description']} {p.system_prompt_block()}".lower()

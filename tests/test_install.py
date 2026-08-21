@@ -269,6 +269,11 @@ def test_a_tilde_home_is_expanded(tmp_path, monkeypatch):
     import hermes_mnemostack.install as inst
 
     monkeypatch.setenv("HOME", str(tmp_path))
+    # `ntpath.expanduser` never consults HOME — it reads USERPROFILE, then
+    # HOMEDRIVE+HOMEPATH. Setting only HOME expands `~` to the real user's
+    # profile on Windows, which is both a false failure and a test writing
+    # outside its tmp_path.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     home, how = inst.resolve_hermes_home("~/profile")
     assert home == tmp_path / "profile", (home, how)
 
@@ -283,11 +288,15 @@ def test_the_scoped_setup_command_is_shell_safe(tmp_path):
     import hermes_mnemostack.install as inst
 
     for raw in ("/tmp/my profile", "/tmp/x;touch pwned", "/tmp/plain"):
-        line = inst._setup_command(pathlib.Path(raw), explicit=True)
+        path = pathlib.Path(raw)
+        line = inst._setup_command(path, explicit=True)
         # Read it the way a shell reads it: one env assignment carrying the
         # EXACT path, then the command — nothing detached, nothing extra.
+        # Compared against the PLATFORM's rendering of the path, not the
+        # POSIX literal: on Windows `Path("/tmp/x")` prints as `\tmp\x`,
+        # and what matters is that whatever the path is, it arrives whole.
         parts = shlex.split(line)
-        assert parts[0] == f"HERMES_HOME={raw}", (raw, line)
+        assert parts[0] == f"HERMES_HOME={path}", (raw, line)
         assert parts[1:] == ["hermes", "memory", "setup", PLUGIN_NAME], (raw, line)
 
 
@@ -306,9 +315,7 @@ def test_a_symlinked_target_is_never_written_through(tmp_path):
 
     for flags in ((), ("--force",)):
         lines: list[str] = []
-        args = cli.parse_args(
-            ["install", "--hermes-home", str(tmp_path / "home"), *flags]
-        )
+        args = cli.parse_args(["install", "--hermes-home", str(tmp_path / "home"), *flags])
         rc = cmd_install(args, out=lines.append)
         out = "\n".join(lines)
         assert rc == 2, (flags, out)
@@ -563,7 +570,15 @@ def test_an_ordinary_io_failure_is_not_diagnosed_as_a_race(tmp_path, monkeypatch
 
         return _boom
 
-    monkeypatch.setattr(inst.os, "open", _fail(_errno.EACCES, "Permission denied"))
+    # Patched at `mkstemp`, NOT at `os.open`. Raising EACCES from `os.open`
+    # simulates nothing on Windows: `tempfile._mkstemp_inner` reads a
+    # PermissionError there as "a directory of that name already exists"
+    # and retries — TMP_MAX times, which is INT_MAX on Windows, calling
+    # `os.path.isdir` on every pass. That is not a test failure, it is a
+    # six-hour one: CI burned the full job limit twice before the runner
+    # killed it. The install code's own seam is `tempfile.mkstemp`, so
+    # failing it directly says what the test means on every platform.
+    monkeypatch.setattr(inst.tempfile, "mkstemp", _fail(_errno.EACCES, "Permission denied"))
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
     assert inst.cmd_install(args, out=lines.append) == 2
@@ -572,7 +587,9 @@ def test_an_ordinary_io_failure_is_not_diagnosed_as_a_race(tmp_path, monkeypatch
     assert "permissions and free space" in out
     assert "mid-install" not in out
 
-    monkeypatch.setattr(inst.os, "open", _fail(_errno.ELOOP, "Too many levels of symbolic links"))
+    monkeypatch.setattr(
+        inst.tempfile, "mkstemp", _fail(_errno.ELOOP, "Too many levels of symbolic links")
+    )
     lines = []
     assert inst.cmd_install(args, out=lines.append) == 2
     assert "mid-install" in "\n".join(lines)
