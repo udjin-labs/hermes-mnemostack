@@ -87,9 +87,7 @@ def _row_text(value: Any) -> str:
     ellipsis = len(raw) > _ROW_MAX_CHARS
     if ellipsis:
         raw = raw[: _ROW_MAX_CHARS - 1]
-    cleaned = "".join(
-        " " if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch for ch in raw
-    )
+    cleaned = "".join(" " if unicodedata.category(ch) in _STRIPPED_CATEGORIES else ch for ch in raw)
     return cleaned + "\u2026" if ellipsis else cleaned
 
 
@@ -422,8 +420,7 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
             FAIL,
             f"GET /health redirected ({health.status_code} → "
             f"{_safe_location(health.headers.get('location'))})",
-            "point base_url at the FINAL url — the provider's client does not "
-            "follow redirects",
+            "point base_url at the FINAL url — the provider's client does not follow redirects",
         )
         return
     if health.status_code >= 400 or health.status_code < 200:
@@ -440,14 +437,11 @@ def _probe_remote_with(report: Report, cfg: dict[str, Any], http: Any) -> None:
         report.add(
             "service",
             FAIL,
-            f"{base or 'service'} answered /health, but not with a mnemostack "
-            "health document",
+            f"{base or 'service'} answered /health, but not with a mnemostack health document",
             "check base_url — something else is serving this path",
         )
         return
-    version = (
-        f" (mnemostack {_field_text(body['version'])})" if body.get("version") else ""
-    )
+    version = f" (mnemostack {_field_text(body['version'])})" if body.get("version") else ""
     if body.get("status") != "ok":
         # FAIL, not WARN: mnemostack reports `degraded` exactly when Qdrant
         # — its hard dependency — is unreachable. Recall is fail-soft and
@@ -543,8 +537,7 @@ def _report_degradation(report: Report, degraded: Any, notes: Any) -> None:
         report.add(
             "retrieval",
             WARN,
-            "recall reported real degradation: "
-            + _field_text(", ".join(faults)),
+            "recall reported real degradation: " + _field_text(", ".join(faults)),
             "check the service log; some retrieval arm is failing, not merely idle",
         )
     else:
@@ -576,7 +569,9 @@ def _probe_local(report: Report, cfg: dict[str, Any]) -> None:
         from mnemostack.embeddings import get_provider
         from mnemostack.vector import VectorStore
     except Exception as exc:  # noqa: BLE001
-        report.add("mnemostack", FAIL, f"library import failed: {exc}", "pip install 'mnemostack>=2.2'")
+        report.add(
+            "mnemostack", FAIL, f"library import failed: {exc}", "pip install 'mnemostack>=2.2'"
+        )
         return
     kwargs: dict[str, Any] = {}
     if cfg["embedding_model"]:
@@ -729,9 +724,7 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
     )
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser(
-        "status", parents=[common], help="Show the effective configuration (no network)"
-    )
+    sub.add_parser("status", parents=[common], help="Show the effective configuration (no network)")
     sub.add_parser(
         "doctor",
         parents=[common],

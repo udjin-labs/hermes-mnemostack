@@ -1327,3 +1327,33 @@ def test_tool_descriptions_promise_no_specific_retrieval_arms(provider):
     assert re.search(r"\bgraph\b", "graph recall") and not re.search(
         r"\bgraph\b", "a short paragraph of context"
     )
+
+
+def test_the_hard_cap_drops_the_oldest_block_not_the_oldest_arrival(provider):
+    """CI (ubuntu/3.13, windows): the hard cap's own comment promises "the
+    oldest undelivered block goes", but it read "oldest" from whichever
+    dict it was pruning — and those are ordered by when a session was
+    QUEUED. A session that queues first and answers last is the freshest
+    work in the process and the oldest key in most of those dicts, so its
+    block was the one thrown away, by its own worker's cleanup prune, the
+    instant that worker released its thread protection.
+
+    Driven directly rather than through threads: the race decided WHICH
+    prune ran last, and the bug was in what any of them chose."""
+    p, _fake = provider
+    p._MAX_SESSION_STATES = 2  # hard cap at 4
+
+    # Queue order: "first" is the oldest arrival...
+    for sid in ("first", "s1", "s2", "s3", "s4"):
+        p._prefetch_gen[p._session_key(sid)] = 1
+        p._turn_index[p._session_key(sid)] = 0
+    # ...delivery order: everyone else delivered before "first" did.
+    for sid in ("s1", "s2", "s3", "s4", "first"):
+        p._prefetched[p._session_key(sid)] = (f"{sid} block", 1, (f"{sid} text",))
+
+    with p._lock:
+        p._prune_session_dicts_locked()
+
+    survived = p._prefetched.get(p._session_key("first"), ("", 0, ()))[0]
+    assert survived == "first block", "the freshest block was evicted as the oldest arrival"
+    assert len(p._prefetched) <= 4  # ...and the cap was still enforced

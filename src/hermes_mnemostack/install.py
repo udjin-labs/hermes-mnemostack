@@ -432,9 +432,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             # from a killed run, and a container where every invocation is
             # pid 1 would then fail forever, since the sweep that would
             # clear it comes later.
-            fd, made = tempfile.mkstemp(
-                dir=target, prefix=f".{name}.{SCRATCH_TAG}", suffix=".tmp"
-            )
+            fd, made = tempfile.mkstemp(dir=target, prefix=f".{name}.{SCRATCH_TAG}", suffix=".tmp")
             scratch = Path(made)
             created = True  # mkstemp made it: provably ours
             with open(fd, "wb") as handle:

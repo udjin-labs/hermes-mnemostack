@@ -71,7 +71,9 @@ def test_lifecycle_is_callable(monkeypatch, tmp_path):
     assert p.is_available() is True
     p.initialize("sess-1", hermes_home=str(tmp_path), platform="cli")
     assert [t["name"] for t in p.get_tool_schemas()] == [
-        "mnemostack_search", "mnemostack_remember", "mnemostack_forget",
+        "mnemostack_search",
+        "mnemostack_remember",
+        "mnemostack_forget",
     ]
     assert "mnemostack" in p.system_prompt_block()
     assert p.prefetch("query") == ""

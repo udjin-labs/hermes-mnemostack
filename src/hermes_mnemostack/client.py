@@ -300,9 +300,7 @@ class LocalClient:
             host=qdrant_url,
         )
         self._store.ensure_collection()
-        self._recaller = Recaller(
-            embedding_provider=self._provider, vector_store=self._store
-        )
+        self._recaller = Recaller(embedding_provider=self._provider, vector_store=self._store)
         self._scope = dict(scope or {})
         self._tenant = self._scope_tenant(scope)
         self._overfetch = recall_limit_overfetch
@@ -405,13 +403,9 @@ class LocalClient:
                     metadata=item.metadata,
                 )
             prepared.append(item)
-        entries = [
-            (item, len(item.text) > REMOTE_MAX_TEXT_CHARS) for item in prepared
-        ]
+        entries = [(item, len(item.text) > REMOTE_MAX_TEXT_CHARS) for item in prepared]
         flat_items, _origins = expand_remote_items(entries)
-        results = ingest_remote_items(
-            self._provider, self._store, flat_items, tenant=self._tenant
-        )
+        results = ingest_remote_items(self._provider, self._store, flat_items, tenant=self._tenant)
         return RememberOutcome(
             stored=sum(r.status == "stored" for r in results),
             duplicates=sum(r.status == "duplicate" for r in results),
@@ -422,17 +416,13 @@ class LocalClient:
         from mnemostack.ingest import coerce_point_ids
 
         tkw = {"tenant": self._tenant} if self._tenant is not None else {}
-        return int(
-            self._store.invalidate(coerce_point_ids(list(ids)), **tkw)
-        )
+        return int(self._store.invalidate(coerce_point_ids(list(ids)), **tkw))
 
     def forget(self, ids: list[str]) -> int:
         from mnemostack.ingest import coerce_point_ids
 
         tkw = {"tenant": self._tenant} if self._tenant is not None else {}
-        return int(
-            self._store.delete_points(coerce_point_ids(list(ids)), **tkw)
-        )
+        return int(self._store.delete_points(coerce_point_ids(list(ids)), **tkw))
 
     def close(self) -> None:
         close = getattr(getattr(self._store, "client", None), "close", None)
@@ -446,9 +436,7 @@ class LocalClient:
 def build_client(cfg: dict[str, Any], *, scope: dict[str, str] | None = None) -> MnemoStackClient:
     """Construct the configured transport from a load_config() dict."""
     if cfg["mode"] == "remote":
-        return RemoteClient(
-            cfg["base_url"], api_key=cfg.get("api_key", ""), timeout=cfg["timeout"]
-        )
+        return RemoteClient(cfg["base_url"], api_key=cfg.get("api_key", ""), timeout=cfg["timeout"])
     return LocalClient(
         collection=cfg["collection"],
         qdrant_url=cfg["qdrant_url"],

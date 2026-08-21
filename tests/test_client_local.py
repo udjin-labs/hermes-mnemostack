@@ -50,9 +50,7 @@ def test_round_trip_and_scope_stamping(local_pair):
     hits = coder.recall("tabs or spaces")
     assert hits and hits[0].payload.get("hermes_profile") == "coder"
     # Duplicate: dedup against the store.
-    assert coder.remember(
-        [MemoryItem(text="prefers tabs over spaces", source="s")]
-    ).duplicates == 1
+    assert coder.remember([MemoryItem(text="prefers tabs over spaces", source="s")]).duplicates == 1
 
 
 def test_two_profiles_do_not_see_each_other(local_pair):
@@ -106,8 +104,10 @@ def test_oversized_item_chunks_instead_of_failing(local_pair):
     coder, _writer, _store = local_pair
     big = "deploy notes " * 4000  # > 32768 chars
     out = coder.remember(
-        [MemoryItem(text=big, source="hermes/cli/s", offset=0),
-         MemoryItem(text="small survivor", source="hermes/cli/s", offset=1)]
+        [
+            MemoryItem(text=big, source="hermes/cli/s", offset=0),
+            MemoryItem(text="small survivor", source="hermes/cli/s", offset=1),
+        ]
     )
     assert out.failed == 0 and out.stored > 2  # chunk expansion happened
     assert any("survivor" in h.text for h in coder.recall("small survivor"))

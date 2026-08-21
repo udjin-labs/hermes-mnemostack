@@ -148,9 +148,7 @@ def test_doctor_probes_a_real_service_and_confirms_the_read_scope(
     assert "read scope confirmed" in out
 
 
-def test_doctor_reports_a_rejected_key_as_a_key_problem(
-    tmp_path, service_app, capsys, monkeypatch
-):
+def test_doctor_reports_a_rejected_key_as_a_key_problem(tmp_path, service_app, capsys, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
 
@@ -653,8 +651,7 @@ def test_a_forged_row_cannot_ride_in_on_a_degradation_tag(tmp_path, capsys):
     )
     out = capsys.readouterr().out
     assert not any(
-        line.lstrip().startswith("✓") and "FORGED-VIA-DEGRADED" in line
-        for line in out.splitlines()
+        line.lstrip().startswith("✓") and "FORGED-VIA-DEGRADED" in line for line in out.splitlines()
     )
 
 
@@ -698,9 +695,9 @@ def test_no_invisible_control_survives_a_row():
     for ch in suspects:
         assert ch not in cli._row_text(f"ok{ch}text"), hex(ord(ch))
     # Ordinary text of any script is untouched.
-    assert cli._row_text("\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587") == (
+    assert cli._row_text(
         "\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587"
-    )
+    ) == ("\u0440\u0443\u0441\u0441\u043a\u0438\u0439 ok \U0001f600 \u4e2d\u6587")
 
 
 def test_a_server_cannot_pad_a_diagnosis_out_of_the_report(tmp_path, capsys):

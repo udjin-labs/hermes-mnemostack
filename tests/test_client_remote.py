@@ -23,14 +23,10 @@ def _client(app, key):
 def test_full_lifecycle_round_trip(service_app):
     app, store, _emb, keys = service_app
     c = _client(app, keys["alpha"])
-    out = c.remember(
-        [MemoryItem(text="the deploy window is Friday 15:00", source="chat/1")]
-    )
+    out = c.remember([MemoryItem(text="the deploy window is Friday 15:00", source="chat/1")])
     assert (out.stored, out.duplicates, out.failed) == (1, 0, 0)
     # Duplicate re-send: zero-cost dedup.
-    again = c.remember(
-        [MemoryItem(text="the deploy window is Friday 15:00", source="chat/1")]
-    )
+    again = c.remember([MemoryItem(text="the deploy window is Friday 15:00", source="chat/1")])
     assert again.duplicates == 1 and again.stored == 0
 
     hits = c.recall("deploy window", limit=5)
@@ -86,8 +82,10 @@ def test_oversized_item_rides_chunking_not_a_400(service_app):
     c = _client(app, keys["alpha"])
     big = "long assistant answer " * 2000  # > 32768 chars
     out = c.remember(
-        [MemoryItem(text="short user question", source="chat/2", offset=0),
-         MemoryItem(text=big, source="chat/2", offset=1)]
+        [
+            MemoryItem(text="short user question", source="chat/2", offset=0),
+            MemoryItem(text=big, source="chat/2", offset=1),
+        ]
     )
     assert out.failed == 0 and out.stored > 2
     assert any("short user question" in h.text for h in c.recall("short user question"))

@@ -48,7 +48,7 @@ _DEFAULTS: dict[str, Any] = {
     "embedding_model": "",
     # behavior
     "recall_limit": 5,
-    "capture": True,          # store user+assistant turns
+    "capture": True,  # store user+assistant turns
 }
 
 _ENV_MAP = {
@@ -126,9 +126,7 @@ def load_config(hermes_home: str | None = None) -> dict[str, Any]:
             raise ValueError(f"{path} must contain a JSON object")
         unknown = set(data) - set(_DEFAULTS)
         if unknown:
-            raise ValueError(
-                f"unknown key(s) in {path.name}: {', '.join(sorted(unknown))}"
-            )
+            raise ValueError(f"unknown key(s) in {path.name}: {', '.join(sorted(unknown))}")
         for key, value in data.items():
             cfg[key] = _coerce(key, value)
     if cfg["mode"] not in MODES:

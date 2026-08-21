@@ -46,6 +46,7 @@ except ImportError:  # hermes-agent 0.19
         stripped = text.strip()
         return stripped.startswith("/") or len(stripped) < 3
 
+
 from .client import MemoryItem, MnemoStackClient, build_client
 from .config import availability_problem, load_config
 from .config import save_config as _save_config_file
@@ -369,9 +370,7 @@ class MnemostackProvider(MemoryProvider):
             if tool_name == "mnemostack_search":
                 query = str(args.get("query") or "").strip()
                 if not query:
-                    return json.dumps(
-                        {"ok": False, "error": "missing required argument: query"}
-                    )
+                    return json.dumps({"ok": False, "error": "missing required argument: query"})
                 limit = int(args.get("limit") or self._cfg.get("recall_limit", 5))
                 hits = client.recall(query, limit=max(1, min(20, limit)))
                 # Tool results are shown to the model just like injected
@@ -382,9 +381,7 @@ class MnemostackProvider(MemoryProvider):
                 shown = [(h, self._display_text(h.text)) for h in hits]
                 if shown:
                     with self._lock:
-                        self._note_injected_locked(
-                            session_key, tuple(t for _h, t in shown)
-                        )
+                        self._note_injected_locked(session_key, tuple(t for _h, t in shown))
                 return json.dumps(
                     {
                         "ok": True,
@@ -398,9 +395,7 @@ class MnemostackProvider(MemoryProvider):
             if tool_name == "mnemostack_remember":
                 text = str(args.get("text") or "").strip()
                 if not text:
-                    return json.dumps(
-                        {"ok": False, "error": "missing required argument: text"}
-                    )
+                    return json.dumps({"ok": False, "error": "missing required argument: text"})
                 out = client.remember(
                     [
                         MemoryItem(
@@ -414,23 +409,17 @@ class MnemostackProvider(MemoryProvider):
                         )
                     ]
                 )
-                return json.dumps(
-                    {"ok": True, "stored": out.stored, "duplicates": out.duplicates}
-                )
+                return json.dumps({"ok": True, "stored": out.stored, "duplicates": out.duplicates})
             if tool_name == "mnemostack_forget":
                 mem_id = str(args.get("id") or "").strip()
                 if not mem_id:
-                    return json.dumps(
-                        {"ok": False, "error": "missing required argument: id"}
-                    )
+                    return json.dumps({"ok": False, "error": "missing required argument: id"})
                 n = client.invalidate([mem_id])
                 return json.dumps({"ok": True, "retracted": n})
         except Exception as exc:  # noqa: BLE001 — tool errors go to the model as data
             logger.warning("mnemostack tool %s failed: %s", tool_name, exc)
             return json.dumps({"ok": False, "error": str(exc)[:300]})
-        raise NotImplementedError(
-            f"Provider {self.name} does not handle tool {tool_name}"
-        )
+        raise NotImplementedError(f"Provider {self.name} does not handle tool {tool_name}")
 
     # -- Recall path ----------------------------------------------------------
 
@@ -448,18 +437,14 @@ class MnemostackProvider(MemoryProvider):
 
         def _run() -> None:
             try:
-                outcome = client.recall_detailed(
-                    query, limit=int(self._cfg["recall_limit"])
-                )
+                outcome = client.recall_detailed(query, limit=int(self._cfg["recall_limit"]))
                 hits = outcome.hits
                 if outcome.faults:
                     # `degraded` still duplicates routine `notes` tags for
                     # back-compat until mnemostack 3.0 — only entries
                     # ABSENT from notes are real breakage. Logging the raw
                     # degraded list would flag healthy recalls.
-                    logger.warning(
-                        "mnemostack recall degraded: %s", ", ".join(outcome.faults)
-                    )
+                    logger.warning("mnemostack recall degraded: %s", ", ".join(outcome.faults))
             except Exception as exc:  # noqa: BLE001 — recall must never break a turn
                 logger.warning("mnemostack prefetch failed: %s", exc)
                 hits = []
@@ -765,9 +750,7 @@ class MnemostackProvider(MemoryProvider):
                 return  # never resurrect a worker after shutdown started
             if self._capture_worker is not None and self._capture_worker.is_alive():
                 return
-            t = threading.Thread(
-                target=self._capture_loop, daemon=True, name="mnemostack-capture"
-            )
+            t = threading.Thread(target=self._capture_loop, daemon=True, name="mnemostack-capture")
             self._capture_worker = t
             t.start()
 
@@ -802,21 +785,15 @@ class MnemostackProvider(MemoryProvider):
         try:
             out = client.remember(items)
             if out.failed:
-                logger.warning(
-                    "mnemostack capture: %d item(s) failed to embed", out.failed
-                )
+                logger.warning("mnemostack capture: %d item(s) failed to embed", out.failed)
             return
         except Exception as exc:  # noqa: BLE001
             status = getattr(exc, "status_code", None)
-            retryable = (
-                status is not None and 400 <= status < 500 and status not in (401, 403, 429)
-            )
+            retryable = status is not None and 400 <= status < 500 and status not in (401, 403, 429)
             if len(items) < 2 or not retryable:
                 logger.warning("mnemostack capture failed: %s", exc)
                 return
-            logger.warning(
-                "mnemostack capture batch failed (%s) — retrying per item", exc
-            )
+            logger.warning("mnemostack capture batch failed (%s) — retrying per item", exc)
         for item in items:
             try:
                 client.remember([item])
@@ -899,11 +876,7 @@ class MnemostackProvider(MemoryProvider):
             # is either about to run or running; completed workers remove
             # their own entry, so membership stays bounded by real
             # concurrency. Unconsumed blocks are work not yet delivered.
-            return (
-                key == protect
-                or key in self._prefetch_threads
-                or key in self._prefetched
-            )
+            return key == protect or key in self._prefetch_threads or key in self._prefetched
 
         def _evict(victim: str) -> None:
             # SESSION-level eviction: one victim leaves every dict at
@@ -920,19 +893,30 @@ class MnemostackProvider(MemoryProvider):
                         # Hard cap may override BLOCK protection (the
                         # oldest undelivered block goes, loudly) but never
                         # a registered thread nor the in-progress key.
-                        victim = next(
-                            (
-                                k
-                                for k in d
-                                if k != protect and k not in self._prefetch_threads
-                            ),
-                            None,
+                        #
+                        # "Oldest" is read from `_prefetched`, which is
+                        # pop-then-assign on store and therefore ordered by
+                        # DELIVERY, not from `d`, whose order is whenever
+                        # the session was queued. Those disagree exactly
+                        # when it matters: a session that queued first and
+                        # answered last is the freshest work in the
+                        # process and the oldest key in most of these
+                        # dicts, so scanning `d` threw away the block that
+                        # had just arrived — and did it from the finishing
+                        # worker's own cleanup prune, which runs the
+                        # instant that worker gives up its thread
+                        # protection.
+                        eligible = (
+                            k
+                            for k in (*self._prefetched, *d)
+                            if k != protect and k not in self._prefetch_threads
                         )
+                        victim = next(eligible, None)
                         if victim is None:
                             break
                         logger.warning(
-                            "mnemostack session-state hard cap: evicting "
-                            "session state for %r", victim
+                            "mnemostack session-state hard cap: evicting session state for %r",
+                            victim,
                         )
                     else:
                         break  # protected set within tolerance — hold
