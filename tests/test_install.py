@@ -366,3 +366,75 @@ def test_the_shim_registers_through_the_entry_point_hermes_calls(tmp_path):
     module.register(_Ctx())
     assert len(registered) == 1
     assert isinstance(registered[0], MnemostackProvider)
+
+
+def test_no_link_below_the_home_is_written_through(tmp_path):
+    """R2 (codex P1): the round-1 guard covered only the plugin directory.
+    A symlinked `plugins/` redirects the whole install outside the home,
+    and a symlinked FILE inside our own directory is written through by
+    copyfile even without --force. Three positions in three rounds — so
+    the rule is now stated once, for the whole chain below the home."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    treasure = outside / "keep.txt"
+    treasure.write_text("NOT OURS\n", encoding="utf-8")
+
+    # 1. `plugins` itself is a link.
+    home = tmp_path / "home-a"
+    home.mkdir()
+    (home / "plugins").symlink_to(outside, target_is_directory=True)
+    for flags in ((), ("--force",)):
+        lines: list[str] = []
+        args = cli.parse_args(["install", "--hermes-home", str(home), *flags])
+        assert cmd_install(args, out=lines.append) == 2, flags
+        assert "is a symlink (the plugins directory)" in "\n".join(lines)
+    assert not (outside / PLUGIN_NAME).exists()
+    assert treasure.read_text(encoding="utf-8") == "NOT OURS\n"
+
+    # 2. A file INSIDE an otherwise-ours directory is a link.
+    home = tmp_path / "home-b"
+    rc, out = _run(home)
+    assert rc == 0, out
+    (_target(home) / "plugin.yaml").unlink()
+    (_target(home) / "plugin.yaml").symlink_to(treasure)
+    lines = []
+    args = cli.parse_args(["install", "--hermes-home", str(home)])
+    assert cmd_install(args, out=lines.append) == 2
+    assert "plugin.yaml is a symlink" in "\n".join(lines)
+    assert treasure.read_text(encoding="utf-8") == "NOT OURS\n"
+
+
+def test_a_symlinked_home_itself_is_fine(tmp_path):
+    """The operator named that path; a symlinked Hermes home is an
+    ordinary setup and must not be refused."""
+    real = tmp_path / "real-home"
+    real.mkdir()
+    link = tmp_path / "linked-home"
+    link.symlink_to(real, target_is_directory=True)
+    rc, out = _run(link)
+    assert rc == 0, out
+    assert (real / "plugins" / PLUGIN_NAME / "plugin.yaml").is_file()
+
+
+def test_a_link_planted_after_the_check_is_still_not_followed(tmp_path, monkeypatch):
+    """Defense in depth for the race the guard cannot close: if a link
+    appears between the check and the copy, the write must replace the
+    entry rather than open it. Simulated by passing the guard on a
+    destination that IS a link."""
+    import hermes_mnemostack.install as inst
+
+    outside = tmp_path / "outside.txt"
+    outside.write_text("NOT OURS\n", encoding="utf-8")
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    destination = _target(tmp_path) / "README.md"
+    destination.unlink()
+    destination.symlink_to(outside)
+
+    monkeypatch.setattr(inst, "link_problem", lambda _h, _t: None)  # the race
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 0, lines
+    assert outside.read_text(encoding="utf-8") == "NOT OURS\n"  # untouched
+    assert not destination.is_symlink()  # the link was replaced, not written through
+    assert destination.read_text(encoding="utf-8").startswith("# mnemostack")

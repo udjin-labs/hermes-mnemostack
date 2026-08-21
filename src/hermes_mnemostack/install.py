@@ -66,6 +66,32 @@ def resolve_hermes_home(explicit: str | None) -> tuple[Path | None, str]:
         return None, f"hermes could not resolve its home ({type(exc).__name__})"
 
 
+def link_problem(home: Path, target: Path) -> str | None:
+    """Why this destination cannot be written to, or None.
+
+    Three rounds of review found a link in three positions — the plugin
+    directory, then its parent, then a file inside it — so this stops
+    checking positions one at a time and states the rule: BELOW the home
+    the operator named, nothing on the way to a file we write may be a
+    symlink, and no file we write may be one either. A link anywhere in
+    that chain redirects the write outside `$HERMES_HOME`, which is the
+    one thing an installer must never do quietly.
+
+    The home itself is exempt: the operator named that path, and a
+    symlinked Hermes home is a legitimate setup.
+    """
+    for ancestor in (target.parent, target):
+        if ancestor.is_symlink():
+            what = "the plugins directory" if ancestor == target.parent else "the target"
+            return f"{ancestor} is a symlink ({what})"
+    if target.is_dir():
+        for name in SHIM_FILES:
+            entry = target / name
+            if entry.is_symlink():
+                return f"{entry} is a symlink"
+    return None
+
+
 def _target_state(target: Path) -> str:
     """What is sitting at the target path.
 
@@ -225,6 +251,16 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
     result["package"] = detail
     say(f"Package:      hermes-mnemostack {detail}")
 
+    linked = link_problem(home, target)
+    if linked is not None:
+        # Not overridable by --force: through a link the write lands
+        # somewhere the operator never named, and --force is a claim about
+        # WHOSE plugin this is, not a licence to leave the home.
+        result["error"] = linked
+        say(f"error: {linked} — refusing to write through it")
+        say("       remove or move it, then re-run")
+        return finish(2)
+
     state = _target_state(target)
     if state in ("symlink", "not-a-directory"):
         # Not overridable by --force, deliberately: through a symlink the
@@ -258,7 +294,12 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
 
     target.mkdir(parents=True, exist_ok=True)
     for name in SHIM_FILES:
-        shutil.copyfile(source / name, target / name)
+        destination = target / name
+        # Replace, never write INTO: unlink drops a link itself rather
+        # than following it, so even a race that plants one between the
+        # check above and this line cannot redirect the write.
+        destination.unlink(missing_ok=True)
+        shutil.copyfile(source / name, destination)
     result["action"] = "replaced" if state != "absent" else "installed"
     say(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
 
