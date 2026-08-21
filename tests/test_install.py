@@ -431,7 +431,7 @@ def test_a_link_planted_after_the_check_is_still_not_followed(tmp_path, monkeypa
     destination.unlink()
     destination.symlink_to(outside)
 
-    monkeypatch.setattr(inst, "link_problem", lambda _h, _t: None)  # the race
+    monkeypatch.setattr(inst, "destination_problem", lambda _h, _t: None)  # the race
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
     assert inst.cmd_install(args, out=lines.append) == 0, lines
@@ -497,7 +497,7 @@ def test_a_link_planted_at_the_filename_cannot_be_written_through(tmp_path, monk
         if self == destination:  # the race, exactly between unlink and open
             self.symlink_to(outside)
 
-    monkeypatch.setattr(inst, "link_problem", lambda _h, _t: None)
+    monkeypatch.setattr(inst, "destination_problem", lambda _h, _t: None)
     monkeypatch.setattr(pathlib.Path, "unlink", _plant)
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
@@ -506,3 +506,47 @@ def test_a_link_planted_at_the_filename_cannot_be_written_through(tmp_path, monk
     # A refusal with a diagnosis, not a traceback.
     assert rc == 2, lines
     assert "changed at the destination mid-install" in "\n".join(lines)
+
+
+def test_a_plain_file_anywhere_on_the_chain_is_reported_not_crashed_into(tmp_path):
+    """R3 (review agent P2): `plugins` existing as a FILE reached
+    `mkdir(parents=True)`, which raises NotADirectoryError — a raw
+    traceback, and in --json mode no JSON at all, breaking the contract
+    that every path reports. The rule covers the whole chain now, not just
+    the leaf."""
+    import json as _json
+
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "plugins").write_text("not a dir\n", encoding="utf-8")
+
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(home)])
+    assert cmd_install(args, out=lines.append) == 2
+    assert "is not a directory (the plugins directory)" in "\n".join(lines)
+
+    # ...and the machine-readable path answers too, rather than crashing.
+    lines = []
+    args = cli.parse_args(["install", "--hermes-home", str(home), "--json"])
+    assert cmd_install(args, out=lines.append) == 2
+    body = _json.loads("\n".join(lines))
+    assert body["status"] == "error"
+    assert "not a directory" in body["error"]
+
+
+def test_an_os_error_during_the_write_is_still_a_report(tmp_path, monkeypatch):
+    """Whatever the filesystem says at write time, the command answers in
+    its own vocabulary — including under --json."""
+    import json as _json
+
+    import hermes_mnemostack.install as inst
+
+    def _boom(*_a, **_k):
+        raise NotADirectoryError(20, "Not a directory")
+
+    monkeypatch.setattr(pathlib.Path, "mkdir", _boom)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path), "--json"])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    body = _json.loads("\n".join(lines))
+    assert body["status"] == "error" and body["error"]

@@ -90,24 +90,28 @@ def is_link_like(path: Path) -> bool:
     )
 
 
-def link_problem(home: Path, target: Path) -> str | None:
+def destination_problem(home: Path, target: Path) -> str | None:
     """Why this destination cannot be written to, or None.
 
-    Three rounds of review found a link in three positions — the plugin
-    directory, then its parent, then a file inside it — so this stops
-    checking positions one at a time and states the rule: BELOW the home
-    the operator named, nothing on the way to a file we write may be a
-    symlink, and no file we write may be one either. A link anywhere in
-    that chain redirects the write outside `$HERMES_HOME`, which is the
-    one thing an installer must never do quietly.
+    Review found a bad path component in four positions across as many
+    rounds — the plugin directory, its parent, a file inside it, then the
+    parent as a plain FILE. So this states one rule for the whole chain
+    instead of guarding a fifth position later: below the home the
+    operator named, every component on the way to a file we write must be
+    a real directory (or absent), and no file we write may be a link. A
+    link redirects the write outside `$HERMES_HOME`, which is the one
+    thing an installer must never do quietly.
 
     The home itself is exempt: the operator named that path, and a
     symlinked Hermes home is a legitimate setup.
     """
-    for ancestor in (target.parent, target):
-        if is_link_like(ancestor):
-            what = "the plugins directory" if ancestor == target.parent else "the target"
-            return f"{ancestor} is a symlink ({what})"
+    for component in (target.parent, target):
+        what = "the plugins directory" if component == target.parent else "the target"
+        if is_link_like(component):
+            return f"{component} is a symlink ({what})"
+        if component.exists() and not component.is_dir():
+            # Not something to replace — something a human has to look at.
+            return f"{component} is not a directory ({what})"
     if target.is_dir():
         for name in SHIM_FILES:
             entry = target / name
@@ -275,7 +279,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
     result["package"] = detail
     say(f"Package:      hermes-mnemostack {detail}")
 
-    linked = link_problem(home, target)
+    linked = destination_problem(home, target)
     if linked is not None:
         # Not overridable by --force: through a link the write lands
         # somewhere the operator never named, and --force is a claim about
@@ -286,16 +290,6 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         return finish(2)
 
     state = _target_state(target)
-    if state in ("symlink", "not-a-directory"):
-        # Not overridable by --force, deliberately: through a symlink the
-        # write lands wherever it points — outside the Hermes home — and
-        # over a file there is nothing to replace. Both need a human to
-        # look at what is actually there.
-        what = "a symlink" if state == "symlink" else "not a directory"
-        result["error"] = f"{target} is {what}"
-        say(f"error: {result['error']} — refusing to write through it")
-        say("       remove or move it, then re-run")
-        return finish(2)
     if state == "foreign" and not getattr(args, "force", False):
         result["error"] = f"{target} exists and is not this shim"
         say(f"error: {result['error']} — refusing to overwrite it")
@@ -316,7 +310,6 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         say(f"dry-run: {verb} {target} ({', '.join(SHIM_FILES)})")
         return finish(0)
 
-    target.mkdir(parents=True, exist_ok=True)
     for name in SHIM_FILES:
         destination = target / name
         # Replace, never write INTO. unlink drops a link itself rather than
@@ -325,12 +318,17 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         # redirect it either.
         #
         # Residual, stated rather than claimed away: a parent directory
-        # swapped for a link after link_problem() ran would still be
+        # swapped for a link after destination_problem() ran would still be
         # followed. Closing that needs dir_fd-relative opens, which this
         # command does not do — and an attacker who can win that race
         # already owns the plugins directory and can simply place a plugin
         # there. Not a defence this installer can honestly offer.
         try:
+            # mkdir is INSIDE the guard: it raises NotADirectoryError when
+            # a component is a plain file, and an installer that answers a
+            # misconfiguration with a traceback — and, in --json mode, with
+            # no JSON at all — has failed at its one job.
+            target.mkdir(parents=True, exist_ok=True)
             destination.unlink(missing_ok=True)
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(destination, flags, 0o644)
