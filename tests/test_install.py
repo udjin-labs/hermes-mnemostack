@@ -10,6 +10,8 @@ an install that would disappear.
 
 from __future__ import annotations
 
+import pathlib
+
 import pytest
 
 from hermes_mnemostack import cli
@@ -260,3 +262,21 @@ def test_a_tilde_home_is_expanded(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path))
     home, how = inst.resolve_hermes_home("~/profile")
     assert home == tmp_path / "profile", (home, how)
+
+
+def test_the_scoped_setup_command_is_shell_safe(tmp_path):
+    """R2 (codex P2): the line is meant to be pasted into a shell. A Hermes
+    home with a space (this project's own checkout has one) would break
+    into two words, and one with a metacharacter would hand the reader a
+    command that runs something else."""
+    import shlex
+
+    import hermes_mnemostack.install as inst
+
+    for raw in ("/tmp/my profile", "/tmp/x;touch pwned", "/tmp/plain"):
+        line = inst._setup_command(pathlib.Path(raw), explicit=True)
+        # Read it the way a shell reads it: one env assignment carrying the
+        # EXACT path, then the command — nothing detached, nothing extra.
+        parts = shlex.split(line)
+        assert parts[0] == f"HERMES_HOME={raw}", (raw, line)
+        assert parts[1:] == ["hermes", "memory", "setup", PLUGIN_NAME], (raw, line)

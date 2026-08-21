@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import shutil
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -148,7 +149,13 @@ def _setup_command(home: Path, explicit: bool) -> str:
     profile-scoped mistake this command exists to prevent, one line later.
     """
     base = f"hermes memory setup {PLUGIN_NAME}"
-    return f"HERMES_HOME={home} {base}" if explicit else base
+    if not explicit:
+        return base
+    # Quoted: this line is meant to be pasted into a shell, and a Hermes
+    # home may contain spaces (this project's own checkout does) — or
+    # metacharacters, where an unquoted path would hand the reader a
+    # command that runs something else.
+    return f"HERMES_HOME={shlex.quote(str(home))} {base}"
 
 
 def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
