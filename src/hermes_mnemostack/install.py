@@ -444,7 +444,15 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
                 # between the close and the call would re-mode an
                 # unrelated file outside the Hermes home. mkstemp opens at
                 # 0600 and these are read-only data files.
-                os.fchmod(handle.fileno(), 0o644)
+                #
+                # Windows has no fchmod — and no POSIX mode to fix either;
+                # access there is decided by the ACL the file inherits
+                # from the directory, which is what an operator expects.
+                # Skipping is the whole fallback; a path-based chmod would
+                # trade a real property for a cosmetic one.
+                fchmod = getattr(os, "fchmod", None)
+                if fchmod is not None:
+                    fchmod(handle.fileno(), 0o644)
             os.replace(scratch, destination)
         except OSError as exc:
             # Remove only what WE created. O_EXCL failing means something

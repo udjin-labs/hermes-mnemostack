@@ -964,3 +964,19 @@ def test_the_scratch_file_is_readable_before_it_is_moved(tmp_path):
         mode = (_target(tmp_path) / name).stat().st_mode
         assert mode & _stat.S_IROTH, name
         assert not mode & _stat.S_IWOTH, name
+
+
+def test_install_works_where_fchmod_does_not_exist(tmp_path, monkeypatch):
+    """R13 (codex P1): `os.fchmod` is Unix-only, and Windows is in this
+    project's CI matrix — every non-dry-run install there would have
+    raised AttributeError, which the OSError handler does not catch, so a
+    traceback instead of a report. Windows has no POSIX mode to set
+    anyway; access follows the directory's ACL."""
+    import hermes_mnemostack.install as inst
+
+    monkeypatch.delattr(inst.os, "fchmod", raising=False)
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    for name in SHIM_FILES:
+        assert (_target(tmp_path) / name).is_file(), name
+    assert "hermes loads it" in out
