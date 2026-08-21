@@ -719,7 +719,11 @@ def test_a_killed_run_does_not_make_the_target_look_foreign(tmp_path):
     target.mkdir(parents=True)
     orphan = target / f".{SHIM_FILES[0]}.4242.tmp"
     orphan.write_bytes(b"half-written\n")
-    assert inst.is_scratch(orphan.name)
+    assert inst.is_scratch(orphan)
+    import os as _os
+
+    stale = _os.stat(orphan).st_mtime - inst._SCRATCH_STALE_SECONDS - 60
+    _os.utime(orphan, (stale, stale))  # old enough to be nobody's work
 
     rc, out = _run(tmp_path)
     assert rc == 0, out  # retried, no --force needed
@@ -731,11 +735,13 @@ def test_a_strangers_dotfile_is_not_mistaken_for_scratch(tmp_path):
     """The leniency is for files WE name, not for anything hidden."""
     import hermes_mnemostack.install as inst
 
-    assert not inst.is_scratch(".plugin.yaml.tmp")  # no pid
-    assert not inst.is_scratch(".secrets.4242.tmp")  # not one of ours
-    assert not inst.is_scratch("__init__.py.4242.tmp")  # no leading dot
     target = _target(tmp_path)
     target.mkdir(parents=True)
+    for name in (".plugin.yaml.tmp", ".secrets.4242.tmp", "__init__.py.4242.tmp"):
+        entry = target / name
+        entry.write_bytes(b"x")
+        assert not inst.is_scratch(entry), name
+        entry.unlink()
     theirs = target / ".their-notes.txt"
     theirs.write_text("keep\n", encoding="utf-8")
     rc, out = _run(tmp_path)
@@ -771,3 +777,69 @@ def test_cleanup_failure_does_not_replace_the_diagnosis(tmp_path, monkeypatch):
     assert inst.cmd_install(args, out=lines.append) == 2
     body = _json.loads("\n".join(lines))
     assert "No space left on device" in body["error"]  # the ORIGINAL failure
+
+
+def test_only_a_regular_file_can_be_our_leftover(tmp_path):
+    """R8 (codex P2): `O_CREAT|O_EXCL` can only ever have created a REGULAR
+    file, so a directory, a FIFO or a symlink wearing the scratch name is
+    not ours — and treating it as ours let a foreign directory holding
+    only such an entry pass the ownership check and be written into
+    without --force."""
+    import os as _os
+
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    name = f".{SHIM_FILES[0]}.4242.tmp"
+
+    (target / name).mkdir()
+    assert not inst.is_scratch(target / name)
+    rc, out = _run(tmp_path)
+    assert rc == 2 and "is not this shim" in out
+    (target / name).rmdir()
+
+    elsewhere = tmp_path / "elsewhere.txt"
+    elsewhere.write_text("NOT OURS\n", encoding="utf-8")
+    (target / name).symlink_to(elsewhere)
+    assert not inst.is_scratch(target / name)
+    rc, out = _run(tmp_path)
+    assert rc == 2, out
+    assert elsewhere.read_text(encoding="utf-8") == "NOT OURS\n"
+    (target / name).unlink()
+
+    if hasattr(_os, "mkfifo"):
+        _os.mkfifo(target / name)
+        assert not inst.is_scratch(target / name)
+        (target / name).unlink()
+
+
+def test_a_trailing_newline_cannot_smuggle_a_name_past_the_pattern(tmp_path):
+    """R8 (codex P3): `$` matches before a final newline, so on a
+    filesystem that allows one a foreign `.README.md.123.tmp\\n` would be
+    read as ours and deleted."""
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    try:
+        smuggled = target / f".{SHIM_FILES[0]}.123.tmp\n"
+        smuggled.write_bytes(b"theirs")
+    except OSError:  # pragma: no cover — filesystem forbids the name
+        pytest.skip("this filesystem does not allow newlines in names")
+    assert not inst.is_scratch(smuggled)
+    assert smuggled.read_bytes() == b"theirs"
+
+
+def test_a_concurrent_installers_scratch_is_not_swept(tmp_path):
+    """R8 (codex P2): the sweep could unlink another running install's
+    scratch file between its create and its os.replace, failing that run
+    with ENOENT for no filesystem reason. Only files old enough to be
+    nobody's work in progress are swept."""
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    fresh = _target(tmp_path) / f".{SHIM_FILES[1]}.99999.tmp"
+    fresh.write_bytes(b"another install is writing this right now")
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    assert fresh.exists(), "a live installer's scratch was swept"

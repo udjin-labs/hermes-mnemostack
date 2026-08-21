@@ -26,6 +26,7 @@ import os
 import re
 import shlex
 import stat
+import time as _time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -48,12 +49,34 @@ PLUGIN_NAME = "mnemostack"
 #: single interrupted run would make the target look like a stranger's
 #: directory and every later retry would demand --force.
 _SCRATCH_RE = re.compile(
-    r"^\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.\d+\.tmp$"
+    r"\.(?:" + "|".join(re.escape(n) for n in SHIM_FILES) + r")\.\d+\.tmp"
 )
 
+#: How long a scratch file must have sat there before a later install
+#: sweeps it. A CONCURRENT installer's scratch is seconds old and must
+#: survive — deleting it between its create and its os.replace would fail
+#: that run with ENOENT for no real reason. A crashed run's leftover is
+#: swept the next time anyone installs an hour later; until then state
+#: inspection ignores it, so it costs nothing.
+_SCRATCH_STALE_SECONDS = 3600
 
-def is_scratch(name: str) -> bool:
-    return bool(_SCRATCH_RE.match(name))
+
+def is_scratch(entry: Path) -> bool:
+    """Whether this entry is one of OUR interrupted writes.
+
+    Name AND kind: `os.open(..., O_CREAT|O_EXCL)` can only ever have
+    created a regular file, so a directory, a FIFO or a symlink wearing
+    the name is not ours — and treating it as ours would let a foreign
+    directory containing only such an entry pass the ownership check.
+    `fullmatch`, not `match`: `$` also matches before a trailing newline,
+    which on a filesystem that allows one would admit a foreign name.
+    """
+    if not _SCRATCH_RE.fullmatch(entry.name):
+        return False
+    try:
+        return entry.is_file() and not entry.is_symlink()
+    except OSError:  # pragma: no cover — unreadable entry
+        return False
 
 
 def shim_source() -> Path:
@@ -167,7 +190,7 @@ def _target_state(target: Path) -> str:
     # then overwrite them), and our own partial installs always write
     # `__init__.py` first, so they carry the marker.
     try:
-        empty = not any(e for e in target.iterdir() if not is_scratch(e.name))
+        empty = not any(e for e in target.iterdir() if not is_scratch(e))
     except OSError as exc:
         # Statted but not listable. We cannot tell whose it is, so we do
         # not touch it — and we say why, rather than letting the traceback
@@ -402,11 +425,16 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             else:
                 say("       check permissions and free space on that filesystem")
             return finish(2)
-    # Sweep any scratch left by a killed run, ours by name. Best effort:
+    # Sweep scratch left by a killed run — ours by name AND kind, and only
+    # once it is old enough to be nobody's work in progress: a second
+    # installer running right now has a scratch file seconds old, and
+    # deleting it between its create and its os.replace would fail that
+    # run with ENOENT for no filesystem reason at all. Best effort;
     # failing to tidy is not a reason to fail an install that worked.
     try:
+        cutoff = _time.time() - _SCRATCH_STALE_SECONDS
         for entry in target.iterdir():
-            if is_scratch(entry.name):
+            if is_scratch(entry) and entry.stat().st_mtime < cutoff:
                 entry.unlink(missing_ok=True)
     except OSError:
         pass
