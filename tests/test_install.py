@@ -683,26 +683,25 @@ def test_a_failed_update_leaves_the_marker_in_place(tmp_path, monkeypatch):
 
 
 def test_a_failed_write_leaves_no_scratch_file_behind(tmp_path, monkeypatch):
+    """The open succeeds and the WRITE fails — the file is provably ours,
+    so it is tidied. (When the failure comes from `os.open` itself we
+    cannot know whether anything was created, and deleting on the strength
+    of the name is precisely what round 10 stopped doing; the age-gated
+    sweep collects that case later.)"""
     import errno as _errno
 
     import hermes_mnemostack.install as inst
 
-    real_open = inst.os.open
+    real_replace = inst.os.replace
 
-    def _fail_after_create(path, *a, **k):
-        fd = real_open(path, *a, **k)
-        if ".tmp" in str(path):
-            os.close(fd)
-            raise OSError(_errno.EIO, "I/O error")
-        return fd
+    def _fail_before_replace(src, dst, *a, **k):
+        raise OSError(_errno.EIO, "I/O error")
 
-    import os
-
-    monkeypatch.setattr(inst.os, "open", _fail_after_create)
+    monkeypatch.setattr(inst.os, "replace", _fail_before_replace)
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
     assert inst.cmd_install(args, out=lines.append) == 2
-    monkeypatch.undo()
+    monkeypatch.setattr(inst.os, "replace", real_replace)
     leftovers = [e.name for e in _target(tmp_path).iterdir() if e.name.endswith(".tmp")]
     assert leftovers == []
 
@@ -873,3 +872,45 @@ def test_a_scratch_entry_that_vanishes_mid_inspection_is_not_a_stray(tmp_path):
 
     with _mock.patch.object(pathlib.Path, "iterdir", _iterdir):
         assert inst._target_state(target) == "ours"
+
+
+def test_cleanup_removes_only_what_this_run_created(tmp_path):
+    """R10 (review agent P2): the error handler deleted whatever sat at
+    the scratch path, on the strength of the NAME alone. A stranger's file
+    at exactly `.<shimfile>.<our pid>.tmp` makes O_EXCL fail — correctly —
+    and the cleanup then destroyed their data. We remove only the file our
+    own open created."""
+    import os as _os
+
+    import hermes_mnemostack.install as inst
+
+    target = _target(tmp_path)
+    target.mkdir(parents=True)
+    collision = target / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
+    collision.write_text("STRANGER DATA\n", encoding="utf-8")
+
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    assert "File exists" in "\n".join(lines) or "exists" in "\n".join(lines)
+    assert collision.read_text(encoding="utf-8") == "STRANGER DATA\n"
+
+
+def test_cleanup_still_removes_our_own_failed_write(tmp_path, monkeypatch):
+    """The other half of the provenance rule: a scratch file this run DID
+    create and then failed to move into place is still tidied away."""
+    import errno as _errno
+    import os as _os
+
+    import hermes_mnemostack.install as inst
+
+    real_replace = inst.os.replace
+    monkeypatch.setattr(
+        inst.os, "replace", lambda *_a, **_k: (_ for _ in ()).throw(OSError(_errno.EIO, "I/O"))
+    )
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    monkeypatch.setattr(inst.os, "replace", real_replace)
+    scratch = _target(tmp_path) / f".{SHIM_FILES[0]}.{_os.getpid()}.tmp"
+    assert not scratch.exists()

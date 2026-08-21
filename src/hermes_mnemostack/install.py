@@ -171,7 +171,14 @@ def destination_problem(home: Path, target: Path) -> str | None:
 def _target_state(target: Path) -> str:
     """What is sitting at the target path.
 
-    "absent" | "ours" | "foreign" | "symlink" | "not-a-directory".
+    "absent" | "ours" | "foreign" | "unreadable: …" | "symlink" |
+    "not-a-directory".
+
+    In the command's flow `destination_problem` runs FIRST and is the
+    authority on links and non-directories, so the two branches for those
+    are unreachable there — they are kept because this function is also
+    called on its own, and because a silent disagreement between the two
+    is exactly the drift that would be hard to notice.
 
     A symlink is its OWN answer, checked without following: writing
     through one puts files wherever it points — outside `$HERMES_HOME`
@@ -401,6 +408,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         # already owns the plugins directory and can simply place a plugin
         # there. Not a defence this installer can honestly offer.
         scratch = target / f".{name}.{os.getpid()}.tmp"
+        created = False
         try:
             # mkdir is INSIDE the guard: it raises NotADirectoryError when
             # a component is a plain file, and an installer that answers a
@@ -409,18 +417,25 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             target.mkdir(parents=True, exist_ok=True)
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             fd = os.open(scratch, flags, 0o644)
+            created = True  # from here on, that file is provably ours
             with open(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
             os.replace(scratch, destination)
         except OSError as exc:
-            # Cleanup must not replace the diagnosis with its own failure:
-            # the scratch path could itself be a directory, or the
-            # filesystem could refuse this too, and the operator needs the
-            # ORIGINAL error either way.
-            try:
-                scratch.unlink(missing_ok=True)
-            except OSError:
-                pass
+            # Remove only what WE created. O_EXCL failing means something
+            # was already sitting at that path — a stranger's file, or a
+            # leftover from a killed run whose pid was reused — and
+            # deleting it here would destroy data on the strength of a
+            # name alone. Provenance, not a heuristic: the flag is set
+            # after our own open succeeded.
+            #
+            # Cleanup must also not replace the diagnosis with its own
+            # failure: the operator needs the ORIGINAL error either way.
+            if created:
+                try:
+                    scratch.unlink(missing_ok=True)
+                except OSError:
+                    pass
             # A refusal, not a traceback — and the RIGHT refusal. EEXIST and
             # ELOOP are what O_EXCL|O_NOFOLLOW report when something
             # appeared at the destination after the check; everything else
