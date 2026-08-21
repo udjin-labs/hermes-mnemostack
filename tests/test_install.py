@@ -225,3 +225,38 @@ def test_json_output_carries_failures_too(tmp_path, monkeypatch):
     assert body["status"] == "error"
     assert "not importable" in body["error"]
     assert body["action"] is None
+
+
+def test_a_blank_hermes_home_is_refused_not_treated_as_unset():
+    """R1 (review agent P1): every consumer tests this value for
+    truthiness, so `--hermes-home ""` fell through to the AMBIENT home —
+    and for `install` that means writing a plugin into a Hermes profile
+    the operator never named. It cost the reviewer a real write into their
+    own ~/.hermes before anyone noticed."""
+    import hermes_mnemostack.install as inst
+
+    # The CLI refuses it at parse time, for every subcommand.
+    for command in ("install", "status", "doctor"):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.parse_args([command, "--hermes-home", ""])
+        assert excinfo.value.code == 2, command
+    # ...and a library caller passing it directly gets no ambient fallback.
+    home, how = inst.resolve_hermes_home("")
+    assert home is None and "empty" in how
+    home, how = inst.resolve_hermes_home("   ")
+    assert home is None and "empty" in how
+    lines: list[str] = []
+    args = cli.parse_args(["install"])
+    args.hermes_home = ""  # what a library caller could still hand over
+    assert inst.cmd_install(args, out=lines.append) == 2
+    assert "cannot resolve the Hermes home" in "\n".join(lines)
+
+
+def test_a_tilde_home_is_expanded(tmp_path, monkeypatch):
+    """`--hermes-home ~/profile` from a shell that did not expand it must
+    not create a directory literally named "~"."""
+    import hermes_mnemostack.install as inst
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    home, how = inst.resolve_hermes_home("~/profile")
+    assert home == tmp_path / "profile", (home, how)

@@ -44,9 +44,17 @@ def shim_source() -> Path:
 
 
 def resolve_hermes_home(explicit: str | None) -> tuple[Path | None, str]:
-    """(home, how) — the ACTIVE Hermes home, resolved hermes's own way."""
+    """(home, how) — the ACTIVE Hermes home, resolved hermes's own way.
+
+    A BLANK explicit value is refused rather than treated as unset: `if
+    explicit:` is false for "", so it would fall through to the ambient
+    home and install into a profile the caller never named. The CLI
+    rejects it at parse time; this guard covers a library caller.
+    """
+    if explicit is not None and not str(explicit).strip():
+        return None, "--hermes-home was empty"
     if explicit:
-        return Path(explicit), "--hermes-home"
+        return Path(explicit).expanduser(), "--hermes-home"
     try:
         from hermes_constants import get_hermes_home
     except Exception as exc:  # noqa: BLE001 — hermes not installed/importable

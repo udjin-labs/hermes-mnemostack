@@ -759,7 +759,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse, then fill the suppressed shared defaults exactly once."""
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if getattr(args, "hermes_home", None) is not None and not str(args.hermes_home).strip():
+        # A BLANK --hermes-home is not "unset". Every consumer of this
+        # value tests it for truthiness, so an empty string would silently
+        # fall through to the ambient home — and for `install` that means
+        # writing into a Hermes profile the operator did not name. Refused
+        # here, once, for every subcommand.
+        parser.error("--hermes-home must not be empty")
     args.hermes_home = getattr(args, "hermes_home", None)
     args.json = getattr(args, "json", False)
     args.force = getattr(args, "force", False)
