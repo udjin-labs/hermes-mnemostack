@@ -57,6 +57,12 @@ Issues = "https://github.com/udjin-labs/hermes-mnemostack/issues"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# The 0.19 directory shim ships INSIDE the package so `hermes-mnemostack
+# install` has something to copy; plugin.yaml and its README are data files
+# and would otherwise be left out of the wheel.
+[tool.setuptools.package-data]
+hermes_mnemostack = ["plugin/plugin.yaml", "plugin/README.md"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

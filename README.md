@@ -1,9 +1,8 @@
 # hermes-mnemostack
 
 **Status: pre-alpha.** The provider is wired end to end (recall injection, turn
-capture, tools, configuration, CLI) and covered by tests, but it has not been run
-against a live hermes-agent session yet, and the entry-point discovery it relies on
-needs hermes-agent >= 0.20 (see [Install](#install)).
+capture, tools, configuration, CLI) and covered by tests, and hermes-agent's own
+discovery loads it — but it has not been driven through a live agent session yet.
 
 [mnemostack](https://github.com/udjin-labs/mnemostack) memory provider for
 [hermes-agent](https://github.com/NousResearch/hermes-agent): persistent agent memory
@@ -21,20 +20,36 @@ over either transport.
 
 ## Install
 
+Requires mnemostack >= 2.2 and hermes-agent >= 0.19.
+
+**hermes-agent 0.19** discovers memory providers by scanning
+`$HERMES_HOME/plugins/<name>/`; it does not read pip entry points. So the package
+ships a small directory shim and a command that puts it where Hermes looks:
+
 ```bash
 pip install hermes-mnemostack
-hermes memory setup   # select "mnemostack"
+hermes-mnemostack install          # copies the shim into the ACTIVE Hermes profile
+hermes memory setup mnemostack
 ```
 
-Requires mnemostack >= 2.2 (on PyPI) and hermes-agent >= 0.19.
+`install` resolves the Hermes home the way Hermes does (so it lands in the active
+profile, not a hardcoded `~/.hermes`), refuses to overwrite a different plugin of the
+same name, and — because 0.19 logs a failed plugin import at debug level and then
+silently omits the provider — finishes by asking Hermes's own discovery whether it
+can actually see and load it. `--dry-run` shows what it would write.
 
-The provider registers through the `hermes_agent.memory_providers` entry point;
-hermes-agent discovers it automatically once the package is installed in the same
-environment. Note: **pip entry-point discovery requires hermes-agent >= 0.20** (not yet
-on PyPI). On 0.19 the ABC is already present, so the provider works — it just has to be
-installed as a directory plugin under `$HERMES_HOME/plugins/mnemostack/` instead.
-`hermes-mnemostack doctor` tells you which of the two situations you are in, by asking
-hermes's own discovery rather than by comparing version numbers.
+**hermes-agent 0.20 and later** discovers the pip entry point on its own:
+
+```bash
+pip install hermes-mnemostack
+hermes memory setup mnemostack
+```
+
+The shim is harmless if it is already there (a directory plugin takes precedence over
+an entry point, and both resolve to the same provider).
+
+`hermes-mnemostack doctor` tells you which situation you are in by asking hermes's own
+discovery rather than by comparing version numbers.
 
 ## Configure
 
@@ -145,7 +160,8 @@ quiet; `hermes-mnemostack doctor` reports the same difference.
 ## Limitations
 
 - Not yet exercised against a live hermes-agent session (pre-alpha).
-- Entry-point discovery needs hermes-agent >= 0.20; 0.19 works as a directory plugin.
+- On hermes-agent 0.19 the provider is found through the directory shim
+  (`hermes-mnemostack install`); entry-point discovery arrives with 0.20.
 - Local mode: recall is vector-only, and scoping is isolation, not authorization.
 - `mnemostack_answer` (server-side generation) is deliberately not wired: it costs an
   LLM call per question and the agent already has a model.

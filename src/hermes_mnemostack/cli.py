@@ -737,6 +737,23 @@ def build_parser() -> argparse.ArgumentParser:
         parents=[common],
         help="Probe the configured transport and report remedies",
     )
+    p_install = sub.add_parser(
+        "install",
+        parents=[common],
+        help="Install the directory shim hermes-agent 0.19 needs to find this provider",
+    )
+    p_install.add_argument(
+        "--force",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Overwrite a plugin directory of the same name that is not this shim",
+    )
+    p_install.add_argument(
+        "--dry-run",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Report what would be written, write nothing",
+    )
     return parser
 
 
@@ -745,6 +762,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     args = build_parser().parse_args(argv)
     args.hermes_home = getattr(args, "hermes_home", None)
     args.json = getattr(args, "json", False)
+    args.force = getattr(args, "force", False)
+    args.dry_run = getattr(args, "dry_run", False)
     return args
 
 
@@ -752,6 +771,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "install":
+        from .install import cmd_install
+
+        return cmd_install(args)
     return cmd_doctor(args)
 
 

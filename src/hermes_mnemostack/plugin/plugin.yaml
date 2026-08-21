@@ -1,0 +1,12 @@
+name: mnemostack
+version: 0.1.0
+description: "mnemostack — persistent agent memory over a mnemostack service or a local Qdrant: hybrid recall, verbatim capture with self-echo suppression, and soft retraction."
+# Deliberately WITHOUT a version specifier. hermes 0.19's CLI setup path
+# derives an import name with `dep.replace("-", "_").split("[")[0]`, which
+# strips "[extras]" but NOT ">=x.y" — so "hermes-mnemostack>=0.1" becomes the
+# unimportable module name "hermes_mnemostack>=0.1" and the dependency reads
+# as permanently missing. (The web path splits specifiers correctly; the two
+# disagree, and hermes's own bundled mem0 hits the same bug with
+# "mem0ai>=2.0.10,<3".) The minimum version is checked in Python instead.
+pip_dependencies:
+  - hermes-mnemostack
