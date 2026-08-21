@@ -480,8 +480,9 @@ def test_the_link_check_asks_about_redirection_not_about_symlinks(tmp_path, monk
 
 
 def test_a_link_planted_at_the_filename_cannot_be_written_through(tmp_path, monkeypatch):
-    """O_NOFOLLOW on the create: even having passed the check, the write
-    refuses to open a link at the destination filename."""
+    """Even having passed the check, a link at the destination filename is
+    REPLACED, never opened: the content is written beside it and moved
+    into place, and a rename replaces the entry rather than following it."""
     import hermes_mnemostack.install as inst
 
     outside = tmp_path / "outside.txt"
@@ -489,23 +490,18 @@ def test_a_link_planted_at_the_filename_cannot_be_written_through(tmp_path, monk
     rc, out = _run(tmp_path)
     assert rc == 0, out
 
-    original_unlink = pathlib.Path.unlink
     destination = _target(tmp_path) / "README.md"
-
-    def _plant(self, *args, **kwargs):
-        original_unlink(self, *args, **kwargs)
-        if self == destination:  # the race, exactly between unlink and open
-            self.symlink_to(outside)
+    destination.unlink()
+    destination.symlink_to(outside)  # planted, and the check is bypassed
 
     monkeypatch.setattr(inst, "destination_problem", lambda _h, _t: None)
-    monkeypatch.setattr(pathlib.Path, "unlink", _plant)
     lines: list[str] = []
     args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
     rc = inst.cmd_install(args, out=lines.append)
+    assert rc == 0, lines
     assert outside.read_text(encoding="utf-8") == "NOT OURS\n"  # never written through
-    # A refusal with a diagnosis, not a traceback.
-    assert rc == 2, lines
-    assert "changed at the destination mid-install" in "\n".join(lines)
+    assert not destination.is_symlink()  # the entry was replaced
+    assert destination.read_text(encoding="utf-8").startswith("# mnemostack")
 
 
 def test_a_plain_file_anywhere_on_the_chain_is_reported_not_crashed_into(tmp_path):
@@ -653,3 +649,59 @@ def test_an_unreadable_target_is_reported_not_crashed_into(tmp_path):
         assert "cannot inspect" in "\n".join(lines)
     finally:
         _os.chmod(target, 0o700)
+
+
+def test_a_failed_update_leaves_the_marker_in_place(tmp_path, monkeypatch):
+    """R6 (codex P2): unlinking `__init__.py` before rewriting it meant a
+    failure in between left a directory the next run could not recognise
+    as ours — so an ordinary I/O failure made the retry need --force.
+    Writing beside and moving into place means the marker is never
+    absent."""
+    import errno as _errno
+
+    import hermes_mnemostack.install as inst
+
+    rc, out = _run(tmp_path)  # a good install first
+    assert rc == 0, out
+    real_open = inst.os.open
+
+    def _fail_on_first_shim_file(path, *a, **k):
+        if f".{SHIM_FILES[0]}." in str(path):
+            raise OSError(_errno.ENOSPC, "No space left on device")
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(inst.os, "open", _fail_on_first_shim_file)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    monkeypatch.undo()
+
+    # The marker survived the failed update, so the plain retry works.
+    assert SHIM_MARKER in (_target(tmp_path) / "__init__.py").read_text(encoding="utf-8")
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+
+
+def test_a_failed_write_leaves_no_scratch_file_behind(tmp_path, monkeypatch):
+    import errno as _errno
+
+    import hermes_mnemostack.install as inst
+
+    real_open = inst.os.open
+
+    def _fail_after_create(path, *a, **k):
+        fd = real_open(path, *a, **k)
+        if ".tmp" in str(path):
+            os.close(fd)
+            raise OSError(_errno.EIO, "I/O error")
+        return fd
+
+    import os
+
+    monkeypatch.setattr(inst.os, "open", _fail_after_create)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    monkeypatch.undo()
+    leftovers = [e.name for e in _target(tmp_path).iterdir() if e.name.endswith(".tmp")]
+    assert leftovers == []

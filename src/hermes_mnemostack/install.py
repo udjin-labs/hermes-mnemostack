@@ -336,10 +336,16 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
 
     for name in SHIM_FILES:
         destination = target / name
-        # Replace, never write INTO. unlink drops a link itself rather than
-        # following it, and the create is O_NOFOLLOW|O_EXCL, so a link
-        # planted at this FILENAME between the check and the write cannot
-        # redirect it either.
+        # Written beside, then MOVED into place. Two properties come from
+        # that, and neither survives an unlink-then-create:
+        #
+        # - the marker file is never absent. Unlinking `__init__.py` and
+        #   then failing to write it leaves a directory that the NEXT run
+        #   cannot recognise as ours, so an ordinary I/O failure would
+        #   make the retry need --force.
+        # - os.replace does not FOLLOW a link at the destination, it
+        #   replaces the entry — so a link planted at this filename after
+        #   the check still cannot redirect the write.
         #
         # Residual, stated rather than claimed away: a parent directory
         # swapped for a link after destination_problem() ran would still be
@@ -347,18 +353,20 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         # command does not do — and an attacker who can win that race
         # already owns the plugins directory and can simply place a plugin
         # there. Not a defence this installer can honestly offer.
+        scratch = target / f".{name}.{os.getpid()}.tmp"
         try:
             # mkdir is INSIDE the guard: it raises NotADirectoryError when
             # a component is a plain file, and an installer that answers a
             # misconfiguration with a traceback — and, in --json mode, with
             # no JSON at all — has failed at its one job.
             target.mkdir(parents=True, exist_ok=True)
-            destination.unlink(missing_ok=True)
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(destination, flags, 0o644)
+            fd = os.open(scratch, flags, 0o644)
             with open(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
+            os.replace(scratch, destination)
         except OSError as exc:
+            scratch.unlink(missing_ok=True)
             # A refusal, not a traceback — and the RIGHT refusal. EEXIST and
             # ELOOP are what O_EXCL|O_NOFOLLOW report when something
             # appeared at the destination after the check; everything else
