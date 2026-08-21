@@ -279,6 +279,36 @@ def test_a_tilde_home_is_expanded(tmp_path, monkeypatch):
     assert home == tmp_path / "profile", (home, how)
 
 
+def test_the_scoped_setup_command_speaks_the_shell_the_operator_has(monkeypatch, tmp_path):
+    """`VAR=value command` is POSIX syntax. A Windows operator is almost
+    certainly in PowerShell — it is what this project's own CI runs there —
+    where that line is not an assignment at all but a command named
+    `HERMES_HOME=...`, so the setup step the installer just told them to
+    run would never execute."""
+    import hermes_mnemostack.install as inst
+
+    # Built from the rendered path, not a literal: patching `os.name` also
+    # decides which flavour `pathlib` gives us, so the separator here is
+    # whichever one the branch under test would really print.
+    monkeypatch.setattr(inst.os, "name", "posix")
+    home = pathlib.Path("/tmp/my profile")
+    assert inst._setup_command(home, explicit=True) == (
+        f"HERMES_HOME='{home}' hermes memory setup {PLUGIN_NAME}"
+    )
+
+    monkeypatch.setattr(inst.os, "name", "nt")
+    home = pathlib.Path("/tmp/my profile")
+    line = inst._setup_command(home, explicit=True)
+    assert line == f"$env:HERMES_HOME='{home}'; hermes memory setup {PLUGIN_NAME}", line
+
+    # A quote in the path is doubled, the only escape PowerShell has inside
+    # a single-quoted string — an unescaped one would end the literal and
+    # leave the rest of the path as bare tokens.
+    odd = pathlib.Path("/tmp/o'brien")
+    doubled = str(odd).replace("'", "''")
+    assert f"'{doubled}'" in inst._setup_command(odd, explicit=True)
+
+
 def test_the_scoped_setup_command_is_shell_safe(tmp_path):
     """R2 (codex P2): the line is meant to be pasted into a shell. A Hermes
     home with a space (this project's own checkout has one) would break

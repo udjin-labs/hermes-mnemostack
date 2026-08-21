@@ -301,11 +301,30 @@ def _setup_command(home: Path, explicit: bool) -> str:
     base = f"hermes memory setup {PLUGIN_NAME}"
     if not explicit:
         return base
-    # Quoted: this line is meant to be pasted into a shell, and a Hermes
+    # Quoted: this line is meant to be PASTED INTO A SHELL, and a Hermes
     # home may contain spaces (this project's own checkout does) — or
     # metacharacters, where an unquoted path would hand the reader a
     # command that runs something else.
+    #
+    # And in the shell they are actually holding. `VAR=value command` is
+    # POSIX syntax; a Windows operator is almost certainly in PowerShell
+    # (it is what this project's own CI runs there), where that line is
+    # not a variable assignment at all — it is a command named
+    # `HERMES_HOME=...`, and the setup step simply never runs.
+    if os.name == "nt":
+        return f"$env:HERMES_HOME={_powershell_quote(str(home))}; {base}"
     return f"HERMES_HOME={shlex.quote(str(home))} {base}"
+
+
+def _powershell_quote(value: str) -> str:
+    """A single-quoted PowerShell literal.
+
+    Single quotes because PowerShell expands `$` inside double quotes — a
+    path holding `$env:PATH` would otherwise be substituted rather than
+    used. Inside single quotes only the quote itself is special, and it is
+    escaped by doubling.
+    """
+    return "'" + value.replace("'", "''") + "'"
 
 
 def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
