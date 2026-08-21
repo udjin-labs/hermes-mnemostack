@@ -45,8 +45,10 @@ pip install hermes-mnemostack
 hermes memory setup mnemostack
 ```
 
-The shim is harmless if it is already there (a directory plugin takes precedence over
-an entry point, and both resolve to the same provider).
+If the shim is already there it stays harmless: it resolves to the same provider the
+entry point does. (Which of the two Hermes prefers when both are present is untested
+here — 0.20 is git-only at the time of writing — so if you want only one, remove
+`$HERMES_HOME/plugins/mnemostack/`.)
 
 `hermes-mnemostack doctor` tells you which situation you are in by asking hermes's own
 discovery rather than by comparing version numbers.

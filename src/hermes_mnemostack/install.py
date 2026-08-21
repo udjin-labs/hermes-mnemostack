@@ -67,9 +67,23 @@ def resolve_hermes_home(explicit: str | None) -> tuple[Path | None, str]:
 
 
 def _target_state(target: Path) -> str:
-    """"absent" | "ours" | "foreign" — what is sitting at the target path."""
+    """What is sitting at the target path.
+
+    "absent" | "ours" | "foreign" | "symlink" | "not-a-directory".
+
+    A symlink is its OWN answer, checked without following: writing
+    through one puts files wherever it points — outside `$HERMES_HOME`
+    entirely — and `--force` means "replace a foreign plugin directory",
+    not "follow a link somewhere I never looked at". A dangling symlink
+    must be caught here too: `exists()` follows links and reports False
+    for it, which would classify it "absent" and then crash on mkdir.
+    """
+    if target.is_symlink():
+        return "symlink"
     if not target.exists():
         return "absent"
+    if not target.is_dir():
+        return "not-a-directory"
     init = target / "__init__.py"
     if init.is_file() and SHIM_MARKER in init.read_text(encoding="utf-8", errors="replace"):
         return "ours"
@@ -212,6 +226,16 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
     say(f"Package:      hermes-mnemostack {detail}")
 
     state = _target_state(target)
+    if state in ("symlink", "not-a-directory"):
+        # Not overridable by --force, deliberately: through a symlink the
+        # write lands wherever it points — outside the Hermes home — and
+        # over a file there is nothing to replace. Both need a human to
+        # look at what is actually there.
+        what = "a symlink" if state == "symlink" else "not a directory"
+        result["error"] = f"{target} is {what}"
+        say(f"error: {result['error']} — refusing to write through it")
+        say("       remove or move it, then re-run")
+        return finish(2)
     if state == "foreign" and not getattr(args, "force", False):
         result["error"] = f"{target} exists and is not this shim"
         say(f"error: {result['error']} — refusing to overwrite it")

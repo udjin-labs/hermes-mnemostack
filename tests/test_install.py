@@ -178,9 +178,18 @@ def test_the_follow_up_command_stays_in_the_profile_it_installed_into(tmp_path):
     operator to configure a DIFFERENT profile than the one just verified —
     the profile-scoped mistake this command exists to prevent, one line
     later."""
+    import shlex
+
     rc, out = _run(tmp_path)
     assert rc == 0, out
-    assert f"HERMES_HOME={tmp_path} hermes memory setup {PLUGIN_NAME}" in out
+    line = next(ln for ln in out.splitlines() if ln.startswith("Next: "))
+    # Parsed, not string-matched: the home is shell-quoted now, so a
+    # tmp_path containing a space (a valid TMPDIR / --basetemp) would fail
+    # a literal comparison for a reason that has nothing to do with the
+    # behaviour under test.
+    parts = shlex.split(line[len("Next: ") :])
+    assert parts[0] == f"HERMES_HOME={tmp_path}"
+    assert parts[1:] == ["hermes", "memory", "setup", PLUGIN_NAME]
 
 
 def test_the_follow_up_command_is_bare_when_the_home_was_ambient(tmp_path, monkeypatch):
@@ -280,3 +289,80 @@ def test_the_scoped_setup_command_is_shell_safe(tmp_path):
         parts = shlex.split(line)
         assert parts[0] == f"HERMES_HOME={raw}", (raw, line)
         assert parts[1:] == ["hermes", "memory", "setup", PLUGIN_NAME], (raw, line)
+
+
+def test_a_symlinked_target_is_never_written_through(tmp_path):
+    """R1 (review agent P1): with --force the copy followed a symlink and
+    overwrote whatever it pointed at — OUTSIDE the Hermes home. --force
+    means "replace a foreign plugin directory", not "follow a link into
+    somewhere nobody looked at"."""
+    elsewhere = tmp_path / "someone-elses-data"
+    elsewhere.mkdir()
+    treasure = elsewhere / "__init__.py"
+    treasure.write_text("IMPORTANT DATA - NOT OURS\n", encoding="utf-8")
+    plugins = tmp_path / "home" / "plugins"
+    plugins.mkdir(parents=True)
+    (plugins / PLUGIN_NAME).symlink_to(elsewhere, target_is_directory=True)
+
+    for flags in ((), ("--force",)):
+        lines: list[str] = []
+        args = cli.parse_args(
+            ["install", "--hermes-home", str(tmp_path / "home"), *flags]
+        )
+        rc = cmd_install(args, out=lines.append)
+        out = "\n".join(lines)
+        assert rc == 2, (flags, out)
+        assert "is a symlink" in out and "refusing to write through it" in out
+        assert treasure.read_text(encoding="utf-8").startswith("IMPORTANT DATA")
+
+
+def test_a_dangling_symlink_is_reported_not_crashed_into(tmp_path):
+    """R1 (review agent P2): `exists()` FOLLOWS links and says False for a
+    dangling one, so it read as "absent" and the run crashed on mkdir —
+    on the default path, no --force needed."""
+    plugins = tmp_path / "plugins"
+    plugins.mkdir(parents=True)
+    (plugins / PLUGIN_NAME).symlink_to(tmp_path / "nowhere")
+    rc, out = _run(tmp_path)
+    assert rc == 2, out
+    assert "is a symlink" in out
+
+
+def test_a_file_at_the_target_is_reported_not_crashed_into(tmp_path):
+    plugins = tmp_path / "plugins"
+    plugins.mkdir(parents=True)
+    (plugins / PLUGIN_NAME).write_text("not a directory\n", encoding="utf-8")
+    for flags in ((), ("--force",)):
+        lines: list[str] = []
+        args = cli.parse_args(["install", "--hermes-home", str(tmp_path), *flags])
+        rc = cmd_install(args, out=lines.append)
+        out = "\n".join(lines)
+        assert rc == 2, (flags, out)
+        assert "not a directory" in out
+
+
+def test_the_shim_registers_through_the_entry_point_hermes_calls(tmp_path):
+    """R1 (review agent P2): the end-to-end test could not fail on a broken
+    `register()` — hermes falls back to scanning module attributes for a
+    MemoryProvider subclass and instantiating it, and swallows a raising
+    register() at DEBUG. So the documented entry point needs its own pin."""
+    import importlib.util
+
+    from hermes_mnemostack.provider import MnemostackProvider
+
+    rc, out = _run(tmp_path)
+    assert rc == 0, out
+    installed = _target(tmp_path) / "__init__.py"
+    spec = importlib.util.spec_from_file_location("_shim_under_test", installed)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    registered: list[object] = []
+
+    class _Ctx:
+        def register_memory_provider(self, provider):
+            registered.append(provider)
+
+    module.register(_Ctx())
+    assert len(registered) == 1
+    assert isinstance(registered[0], MnemostackProvider)
