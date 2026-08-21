@@ -550,3 +550,59 @@ def test_an_os_error_during_the_write_is_still_a_report(tmp_path, monkeypatch):
     assert inst.cmd_install(args, out=lines.append) == 2
     body = _json.loads("\n".join(lines))
     assert body["status"] == "error" and body["error"]
+
+
+def test_an_ordinary_io_failure_is_not_diagnosed_as_a_race(tmp_path, monkeypatch):
+    """R4 (codex P2): one handler told EVERY OSError that "something
+    changed mid-install; re-run" — which for a full disk, a read-only
+    mount or a permission error sends the operator in circles. The race
+    advice belongs to the errnos O_EXCL|O_NOFOLLOW actually raises."""
+    import errno as _errno
+
+    import hermes_mnemostack.install as inst
+
+    def _fail(errnum, message):
+        def _boom(*_a, **_k):
+            raise OSError(errnum, message)
+
+        return _boom
+
+    monkeypatch.setattr(inst.os, "open", _fail(_errno.EACCES, "Permission denied"))
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    out = "\n".join(lines)
+    assert "Permission denied" in out
+    assert "permissions and free space" in out
+    assert "mid-install" not in out
+
+    monkeypatch.setattr(inst.os, "open", _fail(_errno.ELOOP, "Too many levels of symbolic links"))
+    lines = []
+    assert inst.cmd_install(args, out=lines.append) == 2
+    assert "mid-install" in "\n".join(lines)
+
+
+def test_a_half_written_install_can_be_retried(tmp_path, monkeypatch):
+    """Found while testing the diagnosis above: a write that failed part
+    way left a directory with no `__init__.py`, which the NEXT run
+    classified as "foreign" and refused — stranding the operator at
+    exactly the moment the retry has to work (after a full disk, a
+    permission error, an interrupted run)."""
+    import errno as _errno
+
+    import hermes_mnemostack.install as inst
+
+    def _boom(*_a, **_k):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(inst.os, "open", _boom)
+    lines: list[str] = []
+    args = cli.parse_args(["install", "--hermes-home", str(tmp_path)])
+    assert inst.cmd_install(args, out=lines.append) == 2
+    assert _target(tmp_path).is_dir()  # the directory is there, empty
+    monkeypatch.undo()
+
+    rc, out = _run(tmp_path)  # the retry, on a filesystem that now works
+    assert rc == 0, out
+    for name in SHIM_FILES:
+        assert (_target(tmp_path) / name).is_file(), name

@@ -20,6 +20,7 @@ Two things it deliberately does not leave to chance:
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shlex
@@ -139,9 +140,21 @@ def _target_state(target: Path) -> str:
     if not target.is_dir():
         return "not-a-directory"
     init = target / "__init__.py"
-    if init.is_file() and SHIM_MARKER in init.read_text(encoding="utf-8", errors="replace"):
-        return "ours"
-    return "foreign"
+    if init.is_file():
+        marked = SHIM_MARKER in init.read_text(encoding="utf-8", errors="replace")
+        return "ours" if marked else "foreign"
+    # No `__init__.py`: either an empty directory, or OUR OWN half-written
+    # install (a write that failed part way leaves the directory and
+    # whatever landed before it). Refusing that as "foreign" would strand
+    # the operator — the retry after a full disk or a permission error is
+    # exactly when the command has to work. Anything carrying entries we
+    # never write is still someone else's.
+    strays = [
+        entry.name
+        for entry in target.iterdir()
+        if entry.name not in SHIM_FILES and entry.name != "__pycache__"
+    ]
+    return "foreign" if strays else "ours"
 
 
 def _package_importable() -> tuple[bool, str]:
@@ -335,12 +348,18 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             with open(fd, "wb") as handle:
                 handle.write((source / name).read_bytes())
         except OSError as exc:
-            # A refusal, not a traceback: O_EXCL/O_NOFOLLOW failing here
-            # means something appeared at the destination after the check —
-            # which is exactly the case an operator needs told, clearly.
-            result["error"] = f"could not write {destination}: {exc}"
+            # A refusal, not a traceback — and the RIGHT refusal. EEXIST and
+            # ELOOP are what O_EXCL|O_NOFOLLOW report when something
+            # appeared at the destination after the check; everything else
+            # (a full disk, a read-only mount, a permission error, an
+            # unreadable package file) is an ordinary I/O failure, and
+            # telling that operator to "re-run" would send them in circles.
+            result["error"] = f"could not write {destination}: {exc.strerror or exc}"
             say(f"error: {result['error']}")
-            say("       something changed at the destination mid-install; re-run")
+            if exc.errno in (errno.EEXIST, errno.ELOOP):
+                say("       something changed at the destination mid-install; re-run")
+            else:
+                say("       check permissions and free space on that filesystem")
             return finish(2)
     result["action"] = "replaced" if state != "absent" else "installed"
     say(f"{'Replaced' if state != 'absent' else 'Installed'}: {', '.join(SHIM_FILES)}")
