@@ -51,3 +51,32 @@ def test_the_readme_status_line_is_not_left_a_release_behind():
     status = next((ln for ln in first_lines if ln.startswith("**Status:")), None)
     assert status, "README lost its status line"
     assert _pyproject_version() in status, status
+
+
+def test_the_readme_states_the_number_of_tests_there_actually_are():
+    """The README makes the suite size a headline claim, and a number in
+    prose drifts the moment a test is added — which is exactly how it
+    shipped saying 182 while the suite had grown to 185.
+
+    Pinned so that adding a test fails here until the claim catches up.
+    That friction is the point: the alternative is a number nobody
+    re-checks, which is worse than no number at all.
+    """
+    import ast
+    import re
+
+    counted = 0
+    for path in sorted((ROOT / "tests").glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        counted += sum(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+            for node in ast.walk(tree)
+        )
+
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    match = re.search(r"covered by (\d+) tests", text)
+    assert match, "README no longer states a test count"
+    assert int(match.group(1)) == counted, (
+        f"README says {match.group(1)} tests, the suite has {counted}"
+    )
