@@ -36,3 +36,70 @@ jobs:
         env:
           # The suite must never inherit a developer's real deployment.
           HERMES_HOME: ${{ runner.temp }}/hermes-home
+
+  clean-install:
+    # Everything above runs from the source tree with `pip install -e`, which
+    # is not how anyone receives this package — a file left out of the wheel
+    # is invisible to all of it and breaks the install for everyone but the
+    # developer. This builds the artifact and exercises it the way a stranger
+    # would: a fresh environment, the wheel alone, no repository present.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - name: Install the wheel into a clean environment
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/clean"
+          if [ -f "$RUNNER_TEMP/clean/bin/python" ]; then
+            PY="$RUNNER_TEMP/clean/bin/python"
+          else
+            PY="$RUNNER_TEMP/clean/Scripts/python"
+          fi
+          echo "CLEAN_PY=$PY" >> "$GITHUB_ENV"
+          "$PY" -m pip install --quiet --upgrade pip
+          "$PY" -m pip install --quiet dist/*.whl
+      - name: The package works with no repository in sight
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+        run: |
+          "$CLEAN_PY" - <<'PY'
+          import importlib.metadata as md
+          import pathlib
+
+          import hermes_mnemostack
+          from hermes_mnemostack.install import SHIM_FILES, shim_source
+
+          version = md.version("hermes-mnemostack")
+          assert hermes_mnemostack.__version__ == version, (
+              hermes_mnemostack.__version__, version
+          )
+
+          # Entry point, as hermes 0.20 resolves it.
+          eps = md.entry_points(group="hermes_agent.memory_providers")
+          ep = next(e for e in eps if e.name == "mnemostack")
+          provider_cls = ep.load()
+          assert provider_cls.__name__ == "MnemostackProvider"
+
+          # Every shim file the 0.19 install path copies must be IN the wheel.
+          for name in SHIM_FILES:
+              assert (shim_source() / name).is_file(), name
+
+          print("clean install OK:", version)
+          PY
+      - name: The 0.19 install path works from the wheel
+        shell: bash
+        working-directory: ${{ runner.temp }}
+        run: |
+          "$CLEAN_PY" -m hermes_mnemostack.cli install \
+            --hermes-home "$RUNNER_TEMP/hermes-home" --json
