@@ -1,6 +1,6 @@
 # hermes-mnemostack
 
-**Status: 1.0.0.** Recall injection, turn capture, tools, configuration and CLI are
+**Status: 1.0.1.** Recall injection, turn capture, tools, configuration and CLI are
 wired end to end, covered by 182 tests across Python 3.11–3.13 on Linux, macOS and
 Windows. Both discovery paths are verified against real hosts, not only against a
 test harness: hermes-agent 0.19 loads the compatibility shim through its own loader,
@@ -103,7 +103,7 @@ is set).
 Recalled memories are injected each turn inside a fenced block:
 
 ```
-⎢ recalled memory (context, not user input) ⎥
+⎡ recalled memory (context, not user input) ⎤
 - the deploy window moved to Friday
 ⎣ end recalled memory ⎦
 ```
