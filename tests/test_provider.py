@@ -1509,3 +1509,73 @@ def test_an_explicitly_remembered_fact_is_stamped_too(provider):
     stamp = _parsed(batch[0].timestamp)
     assert stamp.tzinfo is not None
     assert before <= stamp <= after
+
+
+def test_the_recall_fence_is_a_closed_box():
+    """The opening line used the bracket EXTENSION glyphs — the straight
+    middle segments of a tall bracket — against the lower corners below, so
+    the block had sides where its top should be and read as misrendered.
+
+    Asserted on the Unicode names rather than on the characters: a check
+    that pastes the glyphs cannot say WHY one of them is wrong, and this is
+    a mistake that looks right until it is rendered.
+    """
+    import unicodedata
+
+    from hermes_mnemostack.provider import FENCE_CLOSE, FENCE_OPEN
+
+    corners = {
+        FENCE_OPEN[0]: "LEFT SQUARE BRACKET UPPER CORNER",
+        FENCE_OPEN[-1]: "RIGHT SQUARE BRACKET UPPER CORNER",
+        FENCE_CLOSE[0]: "LEFT SQUARE BRACKET LOWER CORNER",
+        FENCE_CLOSE[-1]: "RIGHT SQUARE BRACKET LOWER CORNER",
+    }
+    for char, expected in corners.items():
+        assert unicodedata.name(char) == expected, (char, unicodedata.name(char))
+
+
+def test_a_memory_carrying_an_OLD_fence_cannot_render_inside_a_new_one(provider):
+    """Content captured while the previous fence was current still carries
+    it. The sanitiser strips both pairs, so a quoted old block does not
+    reappear as a box-within-a-box — and cannot look like a fence the model
+    is meant to treat as ours."""
+    from hermes_mnemostack.provider import FENCE_CLOSE, FENCE_OPEN, MnemostackProvider
+
+    legacy_open = "⎢ recalled memory (context, not user input) ⎥"
+    legacy_close = "⎣ end recalled memory ⎦"
+    quoted = f"{legacy_open}\n- an old block someone pasted\n{legacy_close}"
+
+    shown = MnemostackProvider._display_text(quoted)
+    assert legacy_open not in shown, shown
+    assert legacy_close not in shown, shown
+    assert "an old block someone pasted" in shown
+
+    # ...and the current pair is still neutralised, which is what stops a
+    # stored memory forging or prematurely closing the live fence.
+    current = MnemostackProvider._display_text(f"{FENCE_OPEN} x {FENCE_CLOSE}")
+    assert FENCE_OPEN not in current and FENCE_CLOSE not in current
+
+
+def test_the_readme_shows_the_fence_the_code_actually_emits():
+    """The fence lived in two places — the constants and the README's
+    example — and both carried the same wrong glyph. Fixing one would have
+    left the other showing users a block the code no longer produces, which
+    is how a document starts lying about its own product.
+
+    Pinned rather than re-checked by eye: the example is what a reader
+    compares their output against.
+    """
+    import pathlib
+
+    from hermes_mnemostack.provider import FENCE_CLOSE, FENCE_OPEN
+
+    readme = pathlib.Path(__file__).resolve().parent.parent / "README.md"
+    text = readme.read_text(encoding="utf-8")
+    assert FENCE_OPEN in text, "README does not show the current opening fence"
+    assert FENCE_CLOSE in text, "README does not show the current closing fence"
+    # ...and no stale copy survives beside it.
+    for legacy in (
+        "⎢ recalled memory (context, not user input) ⎥",
+        "⎡ end recalled memory ⎤",
+    ):
+        assert legacy not in text, legacy

@@ -64,8 +64,23 @@ GLYPH = "🗿"
 #: (see _recently_injected below), NOT by parsing these markers back out
 #: of turn text: exact-fence stripping is defeated by paraphrase and by a
 #: stray marker in stored content, so it is deliberately not relied on.
-FENCE_OPEN = "\u23a2 recalled memory (context, not user input) \u23a5"
+#:
+#: The opening line uses the bracket UPPER CORNERS (U+23A1/U+23A4). It used
+#: to use the EXTENSION pieces (U+23A2/U+23A5) — the straight middle
+#: segments of a tall bracket — against the lower corners below, so the box
+#: had sides where its top should be and read as misrendered.
+FENCE_OPEN = "\u23a1 recalled memory (context, not user input) \u23a4"
 FENCE_CLOSE = "\u23a3 end recalled memory \u23a6"
+
+#: Fences written before that fix. Content captured or remembered while
+#: they were current still carries them, so the sanitiser strips these too
+#: — otherwise an old block quoted back into a memory would render inside
+#: a new one. Presentation only, like the fences themselves; nothing about
+#: loop protection depends on either pair.
+_LEGACY_FENCES = (
+    "\u23a2 recalled memory (context, not user input) \u23a5",
+    "\u23a3 end recalled memory \u23a6",
+)
 
 #: How many TURNS an injected memory stays eligible for capture
 #: suppression (age, not a count of distinct memories: an entry must not
@@ -697,7 +712,8 @@ class MnemostackProvider(MemoryProvider):
         # A stored memory could itself contain the marker glyphs (via
         # capture or remember) — neutralize them so recalled content
         # can't forge or prematurely close the presentation fence.
-        text = text.replace(FENCE_OPEN, "").replace(FENCE_CLOSE, "")
+        for marker in (FENCE_OPEN, FENCE_CLOSE, *_LEGACY_FENCES):
+            text = text.replace(marker, "")
         if len(text) > 500:
             text = text[:500] + "…"
         return text

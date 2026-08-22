@@ -3,11 +3,26 @@ in-memory Qdrant, deterministic fake embedder) and a local library stack."""
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 
 class FakeEmbedding:
-    """Deterministic 3-dim embedder (mirrors mnemostack's test embedder)."""
+    """A 3-dim embedder that is deterministic ACROSS PROCESSES.
+
+    It used to build the vector from `hash(text)`, which Python salts per
+    process for str: the same text embedded in two runs produced two
+    different vectors, so the ranking of any fixture corpus was random
+    from run to run. Every test that asserts something about ORDER — that
+    a particular memory comes back for a particular query — was therefore
+    flaky by construction, and failed on roughly whichever job drew a bad
+    salt. `blake2s` gives the same bytes everywhere, which is what
+    "deterministic" was always claiming.
+
+    Pinning PYTHONHASHSEED in CI would have hidden it in CI alone and left
+    every contributor's local run rolling dice.
+    """
 
     dimension = 3
 
@@ -16,7 +31,7 @@ class FakeEmbedding:
 
     def embed(self, text: str) -> list[float]:
         self.embedded.append(text)
-        h = abs(hash(text))
+        h = int.from_bytes(hashlib.blake2s(text.encode("utf-8")).digest()[:8], "big")
         return [(h % 97) / 97.0, (h % 89) / 89.0, 1.0]
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
