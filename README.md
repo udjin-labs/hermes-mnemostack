@@ -1,9 +1,13 @@
 # hermes-mnemostack
 
-**Status: 0.9.2.** The provider is wired end to end (recall
-injection, turn capture, tools, configuration, CLI), covered by tests, and
-hermes-agent's own discovery loads it from a clean install — but it has not yet been
-driven through a live agent session, which is why this is 0.9 and not 1.0.
+**Status: 1.0.0.** Recall injection, turn capture, tools, configuration and CLI are
+wired end to end, covered by 182 tests across Python 3.11–3.13 on Linux, macOS and
+Windows. Both discovery paths are verified against real hosts, not only against a
+test harness: hermes-agent 0.19 loads the compatibility shim through its own loader,
+and hermes-agent 0.20 discovers the provider through its entry point. Driven through
+a live session against a running mnemostack service, a turn was captured, recall
+returned it, duplicate detection held, soft retraction and reactivation behaved, and
+`doctor` came back clean on every check.
 
 [mnemostack](https://github.com/udjin-labs/mnemostack) memory provider for
 [hermes-agent](https://github.com/NousResearch/hermes-agent): persistent agent memory
