@@ -124,7 +124,17 @@ should be able to trigger from a conversation.
 
 By default the user's message and the assistant's reply are stored verbatim, each as
 its own memory under a deterministic `(source, offset, text)` id — replaying a turn is
-a zero-cost duplicate, never a second copy. What is **not** captured:
+a zero-cost duplicate, never a second copy.
+
+Each carries the **event time of the turn** (ISO-8601 UTC), stamped where the turn
+happens rather than where the capture queue is drained — a backlog must not hand its
+memories the drain time. Both halves of an exchange share one stamp: they are one
+turn, and their order within it is what the offset carries. This is what mnemostack's
+temporal recall filters on ("what did we discuss last week"), and what its freshness
+stage ages a memory by; before 0.9.2 nothing filled it, so every captured memory was
+invisible to the first and equally fresh forever to the second.
+
+What is **not** captured:
 
 - tool calls and tool results (they routinely carry paths, tokens and workspace
   contents; capturing them needs its own redaction policy, so the knob is deliberately

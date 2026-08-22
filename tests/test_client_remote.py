@@ -153,3 +153,27 @@ def test_routine_notes_are_not_reported_as_faults():
     # Unit contract, independent of transport.
     assert real_faults(["temporal:no_parse"], ["temporal:no_parse"]) == []
     assert real_faults(["vector:error"], []) == ["vector:error"]
+
+
+def test_the_event_time_reaches_the_store(service_app):
+    """The field was plumbed through this transport from the start and
+    nothing ever filled it, which is exactly how "supported" and "working"
+    came apart. Asserted against the STORE, not the request body: a payload
+    key that leaves here but is dropped on arrival is the same outage, and
+    only one of those two checks would notice.
+    """
+    app, store, _emb, keys = service_app
+    c = _client(app, keys["alpha"])
+    stamp = "2026-03-04T05:06:07+00:00"
+    out = c.remember(
+        [MemoryItem(text="quarterly review moved to March", source="chat/ts", timestamp=stamp)]
+    )
+    assert out.stored == 1, out
+
+    points, _ = store.client.scroll(collection_name=store.collection, limit=100, with_payload=True)
+    stamps = [
+        p.payload.get("timestamp")
+        for p in points
+        if str(p.payload.get("source", "")).startswith("chat/ts")
+    ]
+    assert stamps == [stamp], (stamps, [p.payload for p in points])

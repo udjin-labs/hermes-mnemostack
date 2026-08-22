@@ -111,3 +111,57 @@ def test_oversized_item_chunks_instead_of_failing(local_pair):
     )
     assert out.failed == 0 and out.stored > 2  # chunk expansion happened
     assert any("survivor" in h.text for h in coder.recall("small survivor"))
+
+
+def test_the_event_time_reaches_the_store(local_pair):
+    """Same check as the remote transport's, because "it works over HTTP"
+    is not evidence about the library path — they build their requests in
+    different places, and this field was carried but unset on both."""
+    coder, _writer, store = local_pair
+    stamp = "2026-03-04T05:06:07+00:00"
+    assert (
+        coder.remember(
+            [MemoryItem(text="the retro is on Thursdays", source="s/ts", timestamp=stamp)]
+        ).stored
+        == 1
+    )
+
+    points, _ = store.client.scroll(collection_name=store.collection, limit=100, with_payload=True)
+    stamps = [
+        p.payload.get("timestamp")
+        for p in points
+        if str(p.payload.get("source", "")).startswith("s/ts")
+    ]
+    assert stamps == [stamp], (stamps, [p.payload for p in points])
+
+
+def test_re_asserting_a_fact_keeps_its_first_event_time(local_pair):
+    """A deterministic id makes the second `remember` a DUPLICATE, not an
+    upsert — the stored payload is left alone and the first stamp stands.
+
+    That is the intended reading, not a limitation to route around.
+    `timestamp` is the event time: when the fact was asserted. Saying the
+    same thing again is not a new event, and "this memory is being used
+    lately" already has its own channel — `access_count`/`last_accessed`,
+    which is what mnemostack's reinforcement reads. Moving the event time
+    on every re-assertion would collapse those two axes back together.
+
+    Pinned because the opposite was once written down in a commit message,
+    and a claim nothing checks is a claim that drifts.
+    """
+    coder, _writer, store = local_pair
+    first, second = "2026-01-01T00:00:00+00:00", "2026-06-06T06:06:06+00:00"
+    a = coder.remember(
+        [MemoryItem(text="fact X", source="hermes/explicit", offset=0, timestamp=first)]
+    )
+    b = coder.remember(
+        [MemoryItem(text="fact X", source="hermes/explicit", offset=0, timestamp=second)]
+    )
+    assert (a.stored, a.duplicates) == (1, 0)
+    assert (b.stored, b.duplicates) == (0, 1)
+
+    points, _ = store.client.scroll(collection_name=store.collection, limit=100, with_payload=True)
+    stamps = [
+        p.payload.get("timestamp") for p in points if p.payload.get("source") == "hermes/explicit"
+    ]
+    assert stamps == [first], stamps

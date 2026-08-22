@@ -4,7 +4,9 @@ status/session lifecycle — no store, no network."""
 from __future__ import annotations
 
 import json
+import threading
 import time
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -1409,3 +1411,97 @@ def test_work_in_flight_never_costs_the_one_result_that_landed(provider):
         live.set()
         for t in threads:
             t.join(timeout=5.0)
+
+
+# ------------------------------------------------ event time on captures
+
+
+def _parsed(stamp):
+    from datetime import datetime
+
+    return datetime.fromisoformat(stamp)
+
+
+def test_captured_turns_carry_the_time_they_happened(provider):
+    """mnemostack's `timestamp` is the event time of the content, and its
+    recall reads it twice — the temporal arm filters on it, and the
+    freshness stage ages a memory by it with no fallback. Sending nothing
+    was not neutral: it opted every captured memory out of both, which is
+    why every stored memory looked equally fresh forever."""
+    p, fake = provider
+    before = datetime.now(UTC)
+    p.sync_turn("we deploy fridays", "noted", session_id="sess-t")
+    _wait_threads(p)
+    after = datetime.now(UTC)
+
+    (batch,) = fake.remembered
+    for item in batch:
+        assert item.timestamp, item
+        stamp = _parsed(item.timestamp)
+        # Timezone-AWARE and UTC. A naive stamp is read as UTC by the
+        # service anyway, so a naive local clock would silently shift every
+        # memory by the operator's offset.
+        assert stamp.tzinfo is not None, item.timestamp
+        assert stamp.utcoffset() == timedelta(0), item.timestamp
+        assert before <= stamp <= after, (item.timestamp, before, after)
+
+
+def test_both_halves_of_one_turn_share_one_stamp(provider):
+    """They are one exchange; their order within it is what `offset`
+    already carries. Two stamps would imply a gap that did not happen."""
+    p, fake = provider
+    p.sync_turn("question", "answer", session_id="sess-t")
+    _wait_threads(p)
+    (batch,) = fake.remembered
+    assert len(batch) == 2
+    assert batch[0].timestamp == batch[1].timestamp
+
+
+def test_the_stamp_is_the_turn_time_not_the_send_time(provider):
+    """The load-bearing one. The capture queue is bounded and drained by a
+    worker, so stamping where the request is BUILT rather than where the
+    turn happened would give a backlog the drain time — temporal recall
+    would stop being blind and start being wrong, which is worse.
+
+    Simulated by holding the drain: the turn happens, time passes, and only
+    then does the batch reach the client. The stamp must remember the turn.
+    """
+    import hermes_mnemostack.provider as pmod
+
+    p, fake = provider
+    released = threading.Event()
+    original = fake.remember
+
+    def slow_remember(items):
+        released.wait(2.0)
+        return original(items)
+
+    fake.remember = slow_remember  # type: ignore[method-assign]
+
+    turn_time = datetime.now(UTC)
+    p.sync_turn("said at the turn", "replied at the turn", session_id="sess-slow")
+    time.sleep(0.35)  # the worker is now blocked inside remember()
+    released.set()
+    _wait_threads(p)
+
+    (batch,) = fake.remembered
+    stamp = _parsed(batch[0].timestamp)
+    lag = (stamp - turn_time).total_seconds()
+    assert 0 <= lag < 0.2, (
+        f"stamp lags the turn by {lag:.3f}s — it was taken at send time, not at the turn"
+    )
+    assert pmod is not None
+
+
+def test_an_explicitly_remembered_fact_is_stamped_too(provider):
+    """`mnemostack_remember` takes no time argument, so the moment of
+    asserting it is the event time."""
+    p, fake = provider
+    before = datetime.now(UTC)
+    out = p.handle_tool_call("mnemostack_remember", {"text": "the office is in Lisbon"})
+    after = datetime.now(UTC)
+    assert json.loads(out)["ok"] is True
+    (batch,) = fake.remembered
+    stamp = _parsed(batch[0].timestamp)
+    assert stamp.tzinfo is not None
+    assert before <= stamp <= after

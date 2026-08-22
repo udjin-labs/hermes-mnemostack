@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import queue
 import threading
+from datetime import UTC, datetime
 from typing import Any
 
 from agent.memory_provider import MemoryProvider
@@ -179,6 +180,23 @@ SCOPE_PROFILE_KEY = "hermes_profile"
 SCOPE_USER_KEY = "hermes_user"
 
 _SYNC_JOIN_TIMEOUT = 5.0
+
+
+def _event_stamp() -> str:
+    """Now, as the ISO-8601 UTC instant a captured memory HAPPENED at.
+
+    mnemostack's `timestamp` is the event time of the content, and its
+    recall reads it twice: the temporal arm filters on it ("what did we
+    discuss last week" has nothing to match without it), and the freshness
+    stage ages a memory by it — with no fallback, so a memory that carries
+    none sits at a flat middling freshness at any age. Sending nothing was
+    not neutral; it opted every captured memory out of both.
+
+    Explicitly UTC and timezone-AWARE. A naive stamp would be read as UTC
+    by the service anyway, so a naive local clock would silently shift
+    every memory by the operator's offset.
+    """
+    return datetime.now(UTC).isoformat()
 
 
 class MnemostackProvider(MemoryProvider):
@@ -404,6 +422,14 @@ class MnemostackProvider(MemoryProvider):
                             # fact re-remembered anywhere is one memory.
                             source="hermes/explicit",
                             offset=0,
+                            # The moment of FIRST asserting it. The id is
+                            # deterministic, so saying the same thing again
+                            # is a duplicate, not an upsert, and this stamp
+                            # stands — which is the right reading: the event
+                            # time is when the fact was asserted, and "used
+                            # again lately" is what access_count and
+                            # last_accessed carry, on their own axis.
+                            timestamp=_event_stamp(),
                             tags=[str(t) for t in args.get("tags") or []],
                             metadata={"hermes_role": "explicit"},
                         )
@@ -710,6 +736,14 @@ class MnemostackProvider(MemoryProvider):
             turn = self._turn_index.pop(sid, 0)
             self._turn_index[sid] = turn + 1
             self._prune_session_dicts_locked(protect=sid)
+        # One stamp for the whole turn, taken HERE — at the turn, not in the
+        # worker that drains the queue. The queue is bounded and drained
+        # asynchronously, so stamping at send time would give a backlog the
+        # drain time instead of the event time: temporal recall would not be
+        # blind any more, it would be wrong, which is worse.
+        stamp = _event_stamp()
+        # Both halves of an exchange share it: they are one turn, and their
+        # order within it is what `offset` already carries.
         items = []
         for role, content in (("user", user_content), ("assistant", assistant_content)):
             content = (content or "").strip()
@@ -726,6 +760,7 @@ class MnemostackProvider(MemoryProvider):
                     # turn is a zero-cost duplicate, never a second copy.
                     source=f"hermes/{self._platform or 'cli'}/{sid}",
                     offset=turn * 2 + (0 if role == "user" else 1),
+                    timestamp=stamp,
                     metadata={"hermes_role": role, "hermes_turn": turn},
                 )
             )
