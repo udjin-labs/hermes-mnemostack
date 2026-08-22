@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-mnemostack"
-version = "0.9.1"
+version = "0.9.2"
 description = "mnemostack memory provider for hermes-agent: persistent agent memory over a mnemostack service or a local Qdrant"
 readme = "README.md"
 requires-python = ">=3.11"

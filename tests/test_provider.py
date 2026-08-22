@@ -1457,40 +1457,44 @@ def test_both_halves_of_one_turn_share_one_stamp(provider):
     assert batch[0].timestamp == batch[1].timestamp
 
 
-def test_the_stamp_is_the_turn_time_not_the_send_time(provider):
+def test_the_stamp_is_the_turn_time_not_the_send_time(provider, monkeypatch):
     """The load-bearing one. The capture queue is bounded and drained by a
-    worker, so stamping where the request is BUILT rather than where the
+    worker, so stamping where the REQUEST is built rather than where the
     turn happened would give a backlog the drain time — temporal recall
     would stop being blind and start being wrong, which is worse.
 
-    Simulated by holding the drain: the turn happens, time passes, and only
-    then does the batch reach the client. The stamp must remember the turn.
+    Asserted on ORDER, not on elapsed time. A wall-clock budget ("the stamp
+    must be within 200ms of the turn") measures the runner's scheduler as
+    much as the code, and across a nine-way OS/Python matrix that is a test
+    that eventually fails without a regression behind it. A counted clock
+    says the same thing with no timing in it at all: the stamp must be the
+    tick taken AT THE TURN, and ticks handed out afterwards must not win.
     """
     import hermes_mnemostack.provider as pmod
+
+    ticks = iter(f"tick-{i}" for i in range(100))
+    monkeypatch.setattr(pmod, "_event_stamp", lambda: next(ticks))
 
     p, fake = provider
     released = threading.Event()
     original = fake.remember
 
-    def slow_remember(items):
-        released.wait(2.0)
+    def blocked_remember(items):
+        released.wait(5.0)
         return original(items)
 
-    fake.remember = slow_remember  # type: ignore[method-assign]
+    fake.remember = blocked_remember  # type: ignore[method-assign]
 
-    turn_time = datetime.now(UTC)
-    p.sync_turn("said at the turn", "replied at the turn", session_id="sess-slow")
-    time.sleep(0.35)  # the worker is now blocked inside remember()
+    assert pmod._event_stamp() == "tick-0"  # burn one, so the turn takes tick-1
+    p.sync_turn("said at the turn", "replied at the turn", session_id="sess-order")
+    # The worker is blocked inside remember(); every tick from here on is a
+    # tick the stamp must NOT have taken.
+    assert pmod._event_stamp() == "tick-2"
     released.set()
     _wait_threads(p)
 
     (batch,) = fake.remembered
-    stamp = _parsed(batch[0].timestamp)
-    lag = (stamp - turn_time).total_seconds()
-    assert 0 <= lag < 0.2, (
-        f"stamp lags the turn by {lag:.3f}s — it was taken at send time, not at the turn"
-    )
-    assert pmod is not None
+    assert [i.timestamp for i in batch] == ["tick-1", "tick-1"], [i.timestamp for i in batch]
 
 
 def test_an_explicitly_remembered_fact_is_stamped_too(provider):

@@ -1,6 +1,6 @@
 # hermes-mnemostack
 
-**Status: 0.9.1.** The provider is wired end to end (recall
+**Status: 0.9.2.** The provider is wired end to end (recall
 injection, turn capture, tools, configuration, CLI), covered by tests, and
 hermes-agent's own discovery loads it from a clean install — but it has not yet been
 driven through a live agent session, which is why this is 0.9 and not 1.0.
