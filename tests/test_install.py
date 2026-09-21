@@ -49,21 +49,26 @@ def test_the_shim_carries_the_marker_hermes_scans_for():
     assert SHIM_MARKER in source
 
 
-def test_the_shim_declares_its_dependency_without_a_specifier():
-    """hermes 0.19's CLI setup derives an import name with
-    `dep.replace("-","_").split("[")[0]` — it strips extras but NOT `>=x.y`,
-    so a specifier here becomes an unimportable module name and the
-    dependency reads as permanently missing (its own bundled mem0 has the
-    bug). The floor is checked in Python instead."""
+def test_the_shim_pins_its_dependency_and_the_019_cost_is_the_known_one():
+    """The dependency is PINNED (catalog review: an unpinned dep lets the
+    provider body drift under the catalog's commit-sha pin; the exact value
+    is kept in step with the release by test_version.py). The known cost:
+    hermes 0.19's CLI setup derives an import name with
+    `dep.replace("-","_").split("[")[0]`, which does not strip `==x.y.z`,
+    so on 0.19 the dependency reads as missing and setup re-runs a no-op
+    pip install. That is harmless there — 0.19 cannot bootstrap from this
+    list anyway; `hermes-mnemostack install` installs and verifies the
+    package itself. This test documents the trade so a change to either
+    side is a conscious one."""
     import yaml
 
     manifest = yaml.safe_load((shim_source() / "plugin.yaml").read_text(encoding="utf-8"))
     assert manifest["name"] == PLUGIN_NAME
     deps = manifest["pip_dependencies"]
-    assert deps == ["hermes-mnemostack"], deps
-    for dep in deps:
-        import_name = dep.replace("-", "_").split("[")[0]
-        __import__(import_name)  # what hermes 0.19 will actually try
+    assert len(deps) == 1 and deps[0].startswith("hermes-mnemostack=="), deps
+    mangled = deps[0].replace("-", "_").split("[")[0]
+    with pytest.raises(ModuleNotFoundError):
+        __import__(mangled)  # what hermes 0.19 will actually try — and survive
 
 
 def test_every_shim_file_ships_with_the_package():

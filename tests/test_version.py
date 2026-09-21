@@ -43,6 +43,19 @@ def test_the_installed_shim_reports_the_version_it_actually_is():
     assert str(manifest["version"]) == _pyproject_version()
 
 
+def test_the_shim_pip_pin_matches_the_release_it_ships_in():
+    """The catalog pins this repository by commit sha; the shim's pip
+    dependency is what actually delivers the provider body. Unpinned, the
+    reviewed sha would govern only the shim while pip resolved whatever is
+    newest — so the pin must exist AND name this very release, or the code
+    that runs is not the code that was reviewed."""
+    manifest = yaml.safe_load(
+        (ROOT / "src/hermes_mnemostack/plugin/plugin.yaml").read_text(encoding="utf-8")
+    )
+    deps = manifest["pip_dependencies"]
+    assert deps == [f"hermes-mnemostack=={_pyproject_version()}"], deps
+
+
 def test_the_readme_status_line_is_not_left_a_release_behind():
     """The README states the version in prose, so it is the one that gets
     forgotten — and it is also the only one a person reads before deciding
