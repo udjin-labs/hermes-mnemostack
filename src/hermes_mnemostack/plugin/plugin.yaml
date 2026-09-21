@@ -1,12 +1,18 @@
 name: mnemostack
-version: 1.0.1
+version: 1.0.2
 description: "mnemostack — persistent agent memory over a mnemostack service or a local Qdrant: hybrid recall, verbatim capture with self-echo suppression, and soft retraction."
-# Deliberately WITHOUT a version specifier. hermes 0.19's CLI setup path
-# derives an import name with `dep.replace("-", "_").split("[")[0]`, which
-# strips "[extras]" but NOT ">=x.y" — so "hermes-mnemostack>=0.1" becomes the
-# unimportable module name "hermes_mnemostack>=0.1" and the dependency reads
-# as permanently missing. (The web path splits specifiers correctly; the two
-# disagree, and hermes's own bundled mem0 hits the same bug with
-# "mem0ai>=2.0.10,<3".) The minimum version is checked in Python instead.
+# Pinned to the exact version this shim ships in, so a reviewed checkout of
+# the repository resolves to exactly the code that was reviewed — the Hermes
+# plugin catalog pins this tree by commit sha, and an unpinned dependency
+# would let the provider body drift underneath that pin (asked for in the
+# catalog review). test_version.py keeps the pin in step with the release.
+#
+# Known cosmetic cost on hermes 0.19: its CLI setup path derives an import
+# name with `dep.replace("-", "_").split("[")[0]`, which strips "[extras]"
+# but not "==x.y.z", so the dependency reads as missing there and setup
+# re-runs a (no-op) pip install. Harmless: 0.19 cannot bootstrap from this
+# list anyway — `hermes-mnemostack install` installs and verifies the
+# package itself, as its docstring explains. The parsing bug is fixed on
+# the versions the catalog serves (>=0.21).
 pip_dependencies:
-  - hermes-mnemostack
+  - hermes-mnemostack==1.0.2
