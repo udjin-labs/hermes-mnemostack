@@ -1083,3 +1083,43 @@ def test_install_works_where_fchmod_does_not_exist(tmp_path, monkeypatch):
     for name in SHIM_FILES:
         assert (_target(tmp_path) / name).is_file(), name
     assert "hermes loads it" in out
+
+
+def test_the_installed_manifest_drops_the_pin_and_the_tree_keeps_it(tmp_path):
+    """The profile copy is never refreshed by pip, and hermes 0.19 installs
+    the dependency line as written: a stale `==<old>` left there would
+    downgrade the package on the next setup after an upgrade. So the copy
+    is unpinned, while the tree (what the catalog pins by sha) keeps it."""
+    import yaml
+
+    rc, _ = _run(tmp_path)
+    assert rc == 0
+    source = (shim_source() / "plugin.yaml").read_text(encoding="utf-8")
+    installed = (_target(tmp_path) / "plugin.yaml").read_text(encoding="utf-8")
+    assert yaml.safe_load(source)["pip_dependencies"][0].startswith("hermes-mnemostack==")
+    assert yaml.safe_load(installed)["pip_dependencies"] == ["hermes-mnemostack"]
+    # nothing else in the manifest changed
+    changed = [
+        (a, b) for a, b in zip(source.splitlines(), installed.splitlines(), strict=True) if a != b
+    ]
+    assert len(changed) == 1 and changed[0][1].strip() == "- hermes-mnemostack"
+    for name in SHIM_FILES:
+        if name != "plugin.yaml":
+            assert (_target(tmp_path) / name).read_bytes() == (shim_source() / name).read_bytes()
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "  - hermes-mnemostack==1.0.3",
+        "  - hermes-mnemostack>=1.0",
+        "  - hermes-mnemostack ~= 1.0",
+        '  - "hermes-mnemostack==1.0.3"',
+    ],
+)
+def test_the_pin_is_dropped_whatever_its_spelling(tmp_path, line):
+    from hermes_mnemostack.install import shim_file_bytes
+
+    (tmp_path / "plugin.yaml").write_text(f"name: mnemostack\npip_dependencies:\n{line}\n")
+    out = shim_file_bytes(tmp_path, "plugin.yaml").decode()
+    assert "1.0" not in out and "hermes-mnemostack" in out

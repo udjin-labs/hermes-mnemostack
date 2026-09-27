@@ -317,8 +317,13 @@ class MnemostackProvider(MemoryProvider):
     # -- Tools ---------------------------------------------------------------
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
-        if self._client is None:
-            return []
+        # Unconditional: the schemas do not depend on the client, and Hermes
+        # snapshots them into its tool registry when the provider is ADDED —
+        # before initialize() builds the client — and never asks again. A
+        # client gate here registered zero tools, so every call answered
+        # "Unknown tool" while the system prompt advertised them. A call
+        # before initialize (or after shutdown) is answered by
+        # handle_tool_call's own "provider not initialized".
         return [
             {
                 "name": "mnemostack_search",

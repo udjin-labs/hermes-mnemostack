@@ -6,6 +6,8 @@ description: "mnemostack — persistent agent memory over a mnemostack service o
 # plugin catalog pins this tree by commit sha, and an unpinned dependency
 # would let the provider body drift underneath that pin (asked for in the
 # catalog review). test_version.py keeps the pin in step with the release.
+# The copy `hermes-mnemostack install` writes into a profile drops the pin
+# (pip never refreshes that copy, so a stale pin would downgrade on upgrade).
 #
 # Known cosmetic cost on hermes 0.19: its CLI setup path derives an import
 # name with `dep.replace("-", "_").split("[")[0]`, which strips "[extras]"

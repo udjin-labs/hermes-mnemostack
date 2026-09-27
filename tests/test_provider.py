@@ -1579,3 +1579,15 @@ def test_the_readme_shows_the_fence_the_code_actually_emits():
         "⎡ end recalled memory ⎤",
     ):
         assert legacy not in text, legacy
+
+
+def test_tool_schemas_exist_before_initialize():
+    """Hermes snapshots the schemas into its tool registry when the provider
+    is ADDED, before initialize() builds the client, and never asks again —
+    an empty answer there left every tool 'Unknown' for the session."""
+    p = MnemostackProvider()
+    names = [t["name"] for t in p.get_tool_schemas()]
+    assert names == ["mnemostack_search", "mnemostack_remember", "mnemostack_forget"]
+    # a call before initialize is answered, not crashed
+    out = json.loads(p.handle_tool_call("mnemostack_search", {"query": "q"}))
+    assert out == {"ok": False, "error": "provider not initialized"}
