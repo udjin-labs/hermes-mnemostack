@@ -1,5 +1,5 @@
 name: mnemostack
-version: 1.0.2
+version: 1.0.3
 description: "mnemostack — persistent agent memory over a mnemostack service or a local Qdrant: hybrid recall, verbatim capture with self-echo suppression, and soft retraction."
 # Pinned to the exact version this shim ships in, so a reviewed checkout of
 # the repository resolves to exactly the code that was reviewed — the Hermes
@@ -17,4 +17,4 @@ description: "mnemostack — persistent agent memory over a mnemostack service o
 # package itself, as its docstring explains. The parsing bug is fixed on
 # the versions the catalog serves (>=0.21).
 pip_dependencies:
-  - hermes-mnemostack==1.0.2
+  - hermes-mnemostack==1.0.3
