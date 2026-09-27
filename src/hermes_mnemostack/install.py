@@ -99,6 +99,36 @@ def is_scratch(entry: Path) -> bool:
     return stat.S_ISREG(mode)
 
 
+#: A version specifier on the shim's own pip dependency line in plugin.yaml.
+_OWN_DEP_PIN = re.compile(
+    r"^(?P<lead>[ \t]*-[ \t]*[\"']?hermes-mnemostack)[ \t]*(?:===?|~=|!=|<=|>=|<|>)[ \t]*[^\s\"'#]*",
+    re.MULTILINE,
+)
+
+
+def shim_file_bytes(source: Path, name: str) -> bytes:
+    """The bytes `install` writes for one shim file.
+
+    Verbatim, except that the copy of `plugin.yaml` placed in the profile
+    drops the version pin from its own `hermes-mnemostack` dependency. The
+    pin in the repository tree stays: the plugin catalog pins that tree by
+    commit sha and the pin makes pip deliver exactly the reviewed release.
+    But this copy is never refreshed by pip, and Hermes installs from it as
+    written — hermes 0.19 hands the line to pip, and 0.21+ makes the profile
+    plugin a uv workspace member whose sync enforces it — so a stale
+    `==<old>` left in the profile would downgrade the package the next time
+    setup runs after an upgrade. Unpinned, 0.19 finds the installed package
+    already satisfies it; 0.21+ may resolve a newer release than the one
+    installed, never an older one. Re-running this command after an upgrade
+    keeps the shim files themselves current.
+    """
+    data = (source / name).read_bytes()
+    if name != "plugin.yaml":
+        return data
+    text = data.decode("utf-8")
+    return _OWN_DEP_PIN.sub(lambda m: m.group("lead"), text).encode("utf-8")
+
+
 def shim_source() -> Path:
     """The shim inside the installed package."""
     return Path(__file__).resolve().parent / "plugin"
@@ -493,7 +523,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
             scratch = Path(made)
             created = True  # mkstemp made it: provably ours
             with open(fd, "wb") as handle:
-                handle.write((source / name).read_bytes())
+                handle.write(shim_file_bytes(source, name))
                 # Through the DESCRIPTOR, not the path: a path-based chmod
                 # follows symlinks, so a rename plus a planted link
                 # between the close and the call would re-mode an
