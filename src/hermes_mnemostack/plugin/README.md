@@ -7,7 +7,7 @@ Do not copy it by hand — `hermes-mnemostack install` puts it in the right plac
 for the *active* Hermes profile and verifies that hermes can actually load it:
 
 ```bash
-pip install hermes-mnemostack
+pip install 'hermes-mnemostack[hermes]'
 hermes-mnemostack install
 hermes memory setup mnemostack
 ```

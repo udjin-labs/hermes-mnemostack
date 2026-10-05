@@ -443,7 +443,7 @@ def cmd_install(args: argparse.Namespace, out: Any = print) -> int:
         # read, and its failure is invisible at debug level.
         result["error"] = f"hermes_mnemostack is not importable here — {detail}"
         say(f"error: {result['error']}")
-        say("       install the package first: pip install hermes-mnemostack")
+        say("       install the package and host: pip install 'hermes-mnemostack[hermes]'")
         return finish(2)
     result["package"] = detail
     say(f"Package:      hermes-mnemostack {detail}")

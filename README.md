@@ -1,7 +1,7 @@
 # hermes-mnemostack
 
 **Status: 1.0.3.** Recall injection, turn capture, tools, configuration and CLI are
-wired end to end, covered by 190 tests across Python 3.11–3.13 on Linux, macOS and
+wired end to end, covered by 191 tests across Python 3.11–3.13 on Linux, macOS and
 Windows. Both discovery paths are verified against real hosts, not only against a
 test harness: hermes-agent 0.19 loads the compatibility shim through its own loader,
 and hermes-agent 0.20 discovers the provider through its entry point. Driven through
@@ -25,14 +25,25 @@ over either transport.
 
 ## Install
 
-Requires mnemostack >= 2.2 and hermes-agent >= 0.19.
+Requires mnemostack >= 2.2 and hermes-agent >= 0.19 at runtime. The provider
+subclasses Hermes's `MemoryProvider`; it does not work without the host.
+
+Managed Hermes installations supply the host themselves. Install through
+`hermes plugins install mnemostack` rather than pip into a PM-managed environment.
+The base package depends only on mnemostack, so uv does not try to resolve a second
+`hermes-agent` distribution shadowed by the workspace root.
+
+For a standalone pip environment that does not already contain Hermes, request
+`hermes-mnemostack[hermes]` to install the host too. The currently published
+hermes-agent 0.19 requires Python 3.11–3.13; this extra inherits that constraint.
+The commands below are for standalone pip environments.
 
 **hermes-agent 0.19** discovers memory providers by scanning
 `$HERMES_HOME/plugins/<name>/`; it does not read pip entry points. So the package
 ships a small directory shim and a command that puts it where Hermes looks:
 
 ```bash
-pip install hermes-mnemostack
+pip install 'hermes-mnemostack[hermes]'
 hermes-mnemostack install          # copies the shim into the ACTIVE Hermes profile
 hermes memory setup mnemostack
 ```
@@ -43,7 +54,8 @@ same name, and — because 0.19 logs a failed plugin import at debug level and t
 silently omits the provider — finishes by asking Hermes's own discovery whether it
 can actually see and load it. `--dry-run` shows what it would write.
 
-**hermes-agent 0.20 and later** discovers the pip entry point on its own:
+**hermes-agent 0.20 and later**, already installed in a standalone environment,
+discovers the pip entry point on its own:
 
 ```bash
 pip install hermes-mnemostack

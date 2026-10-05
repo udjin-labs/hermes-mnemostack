@@ -13,7 +13,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,hermes]"
       - run: ruff check src tests
       - run: mypy src
 
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e ".[dev]"
+      - run: pip install -e ".[dev,hermes]"
       - name: Pytest
         run: pytest -q
         env:
@@ -66,7 +66,9 @@ jobs:
           fi
           echo "CLEAN_PY=$PY" >> "$GITHUB_ENV"
           "$PY" -m pip install --quiet --upgrade pip
-          "$PY" -m pip install --quiet dist/*.whl
+          for WHL in dist/*.whl; do
+            "$PY" -m pip install --quiet "$WHL[hermes]"
+          done
       - name: The package works with no repository in sight
         shell: bash
         working-directory: ${{ runner.temp }}

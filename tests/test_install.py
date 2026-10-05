@@ -150,7 +150,7 @@ def test_install_refuses_when_the_package_is_not_importable(tmp_path, monkeypatc
     monkeypatch.setattr(inst, "_package_importable", lambda: (False, "ModuleNotFoundError"))
     rc, out = _run(tmp_path)
     assert rc == 2
-    assert "pip install hermes-mnemostack" in out
+    assert "pip install 'hermes-mnemostack[hermes]'" in out
     assert not _target(tmp_path).exists()
 
 
