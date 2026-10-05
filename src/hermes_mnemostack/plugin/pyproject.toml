@@ -1,0 +1,9 @@
+[project]
+name = "hermes-plugin-mnemostack"
+version = "1.0.3"
+requires-python = ">=3.11"
+dependencies = ["hermes-mnemostack==1.0.3"]
+
+# Exempt only reviewed exact pins; transitive releases keep Hermes' quarantine.
+[tool.uv.exclude-newer-package]
+hermes-mnemostack = false
